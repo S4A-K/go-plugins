@@ -230,7 +230,7 @@ func TestHealthChecker_BasicOperations(t *testing.T) {
 		plugin := NewMockHealthPlugin("test-plugin")
 		config := HealthCheckConfig{
 			Enabled:      true,
-			Interval:     50 * time.Millisecond,
+			Interval:     1 * time.Hour, // Very long interval to avoid background interference
 			Timeout:      1 * time.Second,
 			FailureLimit: 2,
 		}
@@ -251,7 +251,7 @@ func TestHealthChecker_BasicOperations(t *testing.T) {
 		plugin := NewMockHealthPlugin("test-plugin")
 		config := HealthCheckConfig{
 			Enabled:      true,
-			Interval:     50 * time.Millisecond,
+			Interval:     1 * time.Hour, // Very long interval to avoid background interference
 			Timeout:      1 * time.Second,
 			FailureLimit: 2,
 		}
@@ -285,7 +285,7 @@ func TestHealthChecker_BasicOperations(t *testing.T) {
 		plugin := NewMockHealthPlugin("test-plugin")
 		config := HealthCheckConfig{
 			Enabled:      true,
-			Interval:     50 * time.Millisecond,
+			Interval:     1 * time.Hour, // Very long interval to avoid background interference
 			Timeout:      1 * time.Second,
 			FailureLimit: 2,
 		}

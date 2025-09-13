@@ -1118,8 +1118,8 @@ func testObservableManagerGetObservabilityMetrics(t *testing.T, observableManage
 		t.Error("GeneratedAt should be set")
 	}
 
-	if report.UpTime <= 0 {
-		t.Error("UpTime should be positive")
+	if report.UpTime < 0 {
+		t.Error("UpTime should be non-negative")
 	}
 
 	// Check global metrics
@@ -1167,6 +1167,9 @@ func TestObservableManager_MetricsReporting(t *testing.T) {
 	baseManager := NewManager[TestRequest, TestResponse](createTestLogger(t))
 	config := DefaultObservabilityConfig()
 	observableManager := NewObservableManager(baseManager, config)
+
+	// Small delay to ensure some uptime for cross-platform timing consistency
+	time.Sleep(1 * time.Millisecond)
 
 	// Setup some test data
 	pluginName := "reporting-test-plugin"
