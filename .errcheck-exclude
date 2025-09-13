@@ -1,0 +1,4 @@
+# errcheck exclusions for legitimate ignore patterns
+
+# Test code that intentionally ignores errors for memory testing
+ExecuteWithObservability
