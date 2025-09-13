@@ -83,9 +83,8 @@ func (m *MockHealthPlugin) Health(ctx context.Context) HealthStatus {
 				ResponseTime: m.responseDelay,
 				Metadata:     m.copyMetadata(),
 			}
-		} else if m.consecutiveErrors == m.maxErrors {
-			// First call after max errors - return success and reset
-			m.consecutiveErrors = 0
+		} else {
+			// After max errors reached, always return healthy
 			return HealthStatus{
 				Status:       StatusHealthy,
 				Message:      "Recovered after max errors",
@@ -524,34 +523,38 @@ func TestHealthChecker_ErrorHandling(t *testing.T) {
 
 	t.Run("ConsecutiveErrorPattern", func(t *testing.T) {
 		plugin := NewMockHealthPlugin("error-pattern-plugin")
-		plugin.SetMaxErrors(3) // Will fail 3 times then succeed
+		plugin.SetMaxErrors(3) // Will fail 3 times then always succeed
 
 		config := HealthCheckConfig{
 			Enabled:      true,
 			Interval:     1 * time.Second,
 			Timeout:      500 * time.Millisecond,
-			FailureLimit: 5, // Higher than max errors
+			FailureLimit: 10, // Higher than max errors to avoid interference
 		}
 
 		checker := NewHealthChecker(plugin, config)
 		defer checker.Stop()
 
-		// Should see pattern: fail, fail, fail, succeed
-		statuses := make([]HealthStatus, 4)
-		for i := 0; i < 4; i++ {
-			statuses[i] = checker.Check()
+		// Test exact pattern: fail, fail, fail, succeed, succeed, ...
+		expectedStatuses := []PluginStatus{
+			StatusUnhealthy, // Call 1
+			StatusUnhealthy, // Call 2  
+			StatusUnhealthy, // Call 3
+			StatusHealthy,   // Call 4 - recovery
+			StatusHealthy,   // Call 5 - should remain healthy
 		}
 
-		// First three should be unhealthy
-		for i := 0; i < 3; i++ {
-			if statuses[i].Status == StatusHealthy {
-				t.Errorf("Check %d should be unhealthy, got %s", i, statuses[i].Status.String())
+		for i, expected := range expectedStatuses {
+			status := checker.Check()
+			if status.Status != expected {
+				t.Errorf("Call %d: Expected %s, got %s", i+1, expected.String(), status.Status.String())
 			}
 		}
 
-		// Fourth should be healthy (after recovery)
-		if statuses[3].Status != StatusHealthy {
-			t.Errorf("Check 4 should be healthy after recovery, got %s", statuses[3].Status.String())
+		// Verify plugin was called the expected number of times
+		callCount := plugin.GetCallCount()
+		if callCount != int64(len(expectedStatuses)) {
+			t.Errorf("Expected %d plugin calls, got %d", len(expectedStatuses), callCount)
 		}
 	})
 }
