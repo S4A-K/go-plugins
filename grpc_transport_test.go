@@ -427,22 +427,31 @@ func TestGRPCPlugin_Health(t *testing.T) {
 	logger := createTestLogger(t)
 
 	tests := []struct {
-		name         string
-		endpoint     string
-		wantStatus   PluginStatus
-		wantContains string
+		name            string
+		endpoint        string
+		wantStatus      PluginStatus
+		wantContainsAny []string // Cross-platform error messages
 	}{
 		{
-			name:         "unavailable_service",
-			endpoint:     "127.0.0.1:19997", // Non-existent server
-			wantStatus:   StatusOffline,
-			wantContains: "connection refused", // Actual gRPC error message
+			name:       "unavailable_service",
+			endpoint:   "127.0.0.1:19997", // Non-existent server
+			wantStatus: StatusOffline,
+			wantContainsAny: []string{
+				"connection refused", // Linux/macOS
+				"No connection could be made because the target machine actively refused it", // Windows
+				"connectex",        // Windows alternative
+				"connection error", // Generic gRPC
+			},
 		},
 		{
-			name:         "invalid_endpoint",
-			endpoint:     "invalid:99999",
-			wantStatus:   StatusOffline,
-			wantContains: "zero addresses", // Actual gRPC resolver error
+			name:       "invalid_endpoint",
+			endpoint:   "invalid:99999",
+			wantStatus: StatusOffline,
+			wantContainsAny: []string{
+				"zero addresses",  // gRPC resolver error
+				"name resolution", // Alternative resolver error
+				"no such host",    // DNS resolution error
+			},
 		},
 	}
 
@@ -471,8 +480,8 @@ func TestGRPCPlugin_Health(t *testing.T) {
 				t.Errorf("Expected health status %v, got %v", tt.wantStatus, healthStatus.Status)
 			}
 
-			if !containsString(healthStatus.Message, tt.wantContains) {
-				t.Errorf("Expected health message to contain %q, got %q", tt.wantContains, healthStatus.Message)
+			if !containsAnyString(healthStatus.Message, tt.wantContainsAny...) {
+				t.Errorf("Expected health message to contain one of %v, got %q", tt.wantContainsAny, healthStatus.Message)
 			}
 
 			// Verify metadata
@@ -774,6 +783,16 @@ func containsString(s, substr string) bool {
 		(len(s) > len(substr) &&
 			(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
 				findSubstring(s, substr))))
+}
+
+// containsAnyString checks if the string contains any of the provided substrings (for cross-platform compatibility)
+func containsAnyString(s string, substrs ...string) bool {
+	for _, substr := range substrs {
+		if containsString(s, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 func findSubstring(s, substr string) bool {
