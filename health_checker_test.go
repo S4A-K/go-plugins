@@ -226,18 +226,18 @@ func TestHealthChecker_Creation(t *testing.T) {
 func TestHealthChecker_BasicOperations(t *testing.T) {
 	t.Parallel()
 
-	plugin := NewMockHealthPlugin("test-plugin")
-	config := HealthCheckConfig{
-		Enabled:      true,
-		Interval:     50 * time.Millisecond,
-		Timeout:      1 * time.Second,
-		FailureLimit: 2,
-	}
-
-	checker := NewHealthChecker(plugin, config)
-	defer checker.Stop()
-
 	t.Run("InitialHealthyStatus", func(t *testing.T) {
+		plugin := NewMockHealthPlugin("test-plugin")
+		config := HealthCheckConfig{
+			Enabled:      true,
+			Interval:     50 * time.Millisecond,
+			Timeout:      1 * time.Second,
+			FailureLimit: 2,
+		}
+
+		checker := NewHealthChecker(plugin, config)
+		defer checker.Stop()
+
 		status := checker.Check()
 		if status.Status != StatusHealthy {
 			t.Errorf("Expected StatusHealthy, got %s", status.Status.String())
@@ -248,6 +248,17 @@ func TestHealthChecker_BasicOperations(t *testing.T) {
 	})
 
 	t.Run("ConsecutiveFailures", func(t *testing.T) {
+		plugin := NewMockHealthPlugin("test-plugin")
+		config := HealthCheckConfig{
+			Enabled:      true,
+			Interval:     50 * time.Millisecond,
+			Timeout:      1 * time.Second,
+			FailureLimit: 2,
+		}
+
+		checker := NewHealthChecker(plugin, config)
+		defer checker.Stop()
+
 		// Set plugin to unhealthy
 		plugin.SetHealth(StatusUnhealthy, "Service unavailable")
 
@@ -271,7 +282,23 @@ func TestHealthChecker_BasicOperations(t *testing.T) {
 	})
 
 	t.Run("RecoveryFromFailures", func(t *testing.T) {
-		// Reset plugin to healthy
+		plugin := NewMockHealthPlugin("test-plugin")
+		config := HealthCheckConfig{
+			Enabled:      true,
+			Interval:     50 * time.Millisecond,
+			Timeout:      1 * time.Second,
+			FailureLimit: 2,
+		}
+
+		checker := NewHealthChecker(plugin, config)
+		defer checker.Stop()
+
+		// First, set plugin to unhealthy to create some failures
+		plugin.SetHealth(StatusUnhealthy, "Service unavailable")
+		checker.Check() // First failure
+		checker.Check() // Second failure (should go offline)
+
+		// Now reset plugin to healthy
 		plugin.SetHealth(StatusHealthy, "OK")
 
 		status := checker.Check()
