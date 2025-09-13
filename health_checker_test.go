@@ -538,7 +538,7 @@ func TestHealthChecker_ErrorHandling(t *testing.T) {
 		// Test exact pattern: fail, fail, fail, succeed, succeed, ...
 		expectedStatuses := []PluginStatus{
 			StatusUnhealthy, // Call 1
-			StatusUnhealthy, // Call 2  
+			StatusUnhealthy, // Call 2
 			StatusUnhealthy, // Call 3
 			StatusHealthy,   // Call 4 - recovery
 			StatusHealthy,   // Call 5 - should remain healthy
