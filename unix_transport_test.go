@@ -16,25 +16,12 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
-
-// TestRequest represents a test request structure
-type TestRequest struct {
-	Action string            `json:"action"`
-	Data   map[string]string `json:"data"`
-}
-
-// TestResponse represents a test response structure
-type TestResponse struct {
-	Result  string            `json:"result"`
-	Details map[string]string `json:"details"`
-}
 
 // mockUnixServer provides a mock Unix socket server for testing
 type mockUnixServer struct {
@@ -47,13 +34,41 @@ type mockUnixServer struct {
 	wg         sync.WaitGroup
 }
 
+// createShortSocketPath creates a short socket path for macOS compatibility
+func createShortSocketPath(t *testing.T) string {
+	t.Helper()
+
+	// Use /tmp directly with a short random suffix for macOS compatibility
+	// Socket paths on macOS are limited to 104 characters
+	tmpFile, err := os.CreateTemp("/tmp", "test_*.sock")
+	if err != nil {
+		t.Fatalf("Failed to create temp file for socket path: %v", err)
+	}
+
+	socketPath := tmpFile.Name()
+	tmpFile.Close()
+
+	// Remove the file so we can use the path for socket
+	if err := os.Remove(socketPath); err != nil {
+		t.Fatalf("Failed to remove temp file: %v", err)
+	}
+
+	// Register cleanup to remove socket file
+	t.Cleanup(func() {
+		if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+			t.Logf("Failed to cleanup socket file %s: %v", socketPath, err)
+		}
+	})
+
+	return socketPath
+}
+
 // newMockUnixServer creates a new mock Unix socket server
 func newMockUnixServer(t *testing.T) *mockUnixServer {
 	t.Helper()
 
-	// Create temporary socket path
-	tmpDir := t.TempDir()
-	socketPath := filepath.Join(tmpDir, "test.sock")
+	// Create short socket path for macOS compatibility (104 char limit)
+	socketPath := createShortSocketPath(t)
 
 	// Remove socket if it exists - ignore error as file may not exist
 	if err := os.Remove(socketPath); err != nil {
@@ -816,9 +831,8 @@ func testFactorySupportedTransports(t *testing.T, factory *UnixSocketPluginFacto
 
 // testFactoryValidateConfig tests factory config validation
 func testFactoryValidateConfig(t *testing.T, factory *UnixSocketPluginFactory[TestRequest, TestResponse]) {
-	// Create a temporary socket for testing
-	tmpDir := t.TempDir()
-	socketPath := filepath.Join(tmpDir, "test.sock")
+	// Create a temporary socket for testing with short path for macOS compatibility
+	socketPath := createShortSocketPath(t)
 
 	// Create the socket file
 	listener, err := net.Listen("unix", socketPath)
@@ -994,10 +1008,38 @@ func handleBenchmarkConnection(conn net.Conn) {
 	}
 }
 
+// createShortSocketPathForBenchmark creates a short socket path for benchmarks
+func createShortSocketPathForBenchmark(b *testing.B) string {
+	b.Helper()
+
+	// Use /tmp directly with a short random suffix for macOS compatibility
+	tmpFile, err := os.CreateTemp("/tmp", "bench_*.sock")
+	if err != nil {
+		b.Fatalf("Failed to create temp file for socket path: %v", err)
+	}
+
+	socketPath := tmpFile.Name()
+	tmpFile.Close()
+
+	// Remove the file so we can use the path for socket
+	if err := os.Remove(socketPath); err != nil {
+		b.Fatalf("Failed to remove temp file: %v", err)
+	}
+
+	// Register cleanup to remove socket file
+	b.Cleanup(func() {
+		if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+			b.Logf("Failed to cleanup socket file %s: %v", socketPath, err)
+		}
+	})
+
+	return socketPath
+}
+
 // setupBenchmarkServer creates and starts a benchmark server
 func setupBenchmarkServer(b *testing.B) (net.Listener, string) {
-	tmpDir := b.TempDir()
-	socketPath := filepath.Join(tmpDir, "bench.sock")
+	// Create short socket path for macOS compatibility
+	socketPath := createShortSocketPathForBenchmark(b)
 
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {

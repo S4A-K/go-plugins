@@ -43,10 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Plugin factory pattern for dynamic instantiation
   - Configuration management with environment variable support
   - Extensive test coverage with benchmarks
-- **Go Generics Support**: Type-safe plugin interfaces using Go 1.23+ generics
+- **Go Generics Support**: Type-safe plugin interfaces using Go 1.24+ generics
 
 ### Technical Details
-- **Minimum Go Version**: 1.23 (required for generics support)
+- **Minimum Go Version**: 1.24 (required for latest dependencies)
 - **Dependencies**:
   - `github.com/agilira/go-errors v1.1.0` for enhanced error handling
   - `github.com/agilira/go-timecache v1.0.1` for high-performance time operations

@@ -25,7 +25,7 @@ go-plugins provides a production-ready, type-safe plugin architecture for Go app
 
 ## Compatibility and Support
 
-go-plugins is designed for Go 1.23+ environments and follows Long-Term Support guidelines to ensure consistent performance across production deployments.
+go-plugins is designed for Go 1.24+ environments and follows Long-Term Support guidelines to ensure consistent performance across production deployments.
 
 ## Quick Start
 

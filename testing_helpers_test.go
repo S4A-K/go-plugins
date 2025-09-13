@@ -568,6 +568,18 @@ func (cph *CrossPlatformHelpers) GetFreePort() (int, error) {
 	return addr.Port, nil
 }
 
+// TestRequest represents a test request structure shared across all test files
+type TestRequest struct {
+	Action string            `json:"action"`
+	Data   map[string]string `json:"data"`
+}
+
+// TestResponse represents a test response structure shared across all test files
+type TestResponse struct {
+	Result  string            `json:"result"`
+	Details map[string]string `json:"details"`
+}
+
 // Global helper instances
 var (
 	TestData      = &TestDataFactory{}
