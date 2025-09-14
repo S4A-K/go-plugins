@@ -502,7 +502,7 @@ func (rl *RateLimiter) Allow() bool {
 
 	// Refill tokens based on elapsed time
 	tokensToAdd := elapsed.Seconds() * rl.config.RequestsPerSecond
-	rl.tokens = min(float64(rl.config.BurstSize), rl.tokens+tokensToAdd)
+	rl.tokens = minFloat64(float64(rl.config.BurstSize), rl.tokens+tokensToAdd)
 	rl.lastRefill = now
 
 	// Check if we have tokens available
@@ -514,8 +514,8 @@ func (rl *RateLimiter) Allow() bool {
 	return false
 }
 
-// min returns the minimum of two float64 values
-func min(a, b float64) float64 {
+// minFloat64 returns the minimum of two float64 values
+func minFloat64(a, b float64) float64 {
 	if a < b {
 		return a
 	}

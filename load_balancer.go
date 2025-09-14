@@ -66,25 +66,25 @@ const (
 	StrategyPriority LoadBalancingStrategy = "priority"
 )
 
-// secureRandomInt generates a cryptographically secure random integer between 0 and max-1
-func secureRandomInt(max int) (int, error) {
-	if max <= 0 {
-		return 0, fmt.Errorf("max must be positive")
+// secureRandomInt generates a cryptographically secure random integer between 0 and maxVal-1
+func secureRandomInt(maxVal int) (int, error) {
+	if maxVal <= 0 {
+		return 0, fmt.Errorf("maxVal must be positive")
 	}
 
 	// Check for potential overflow in conversion to uint32
 	const maxSafeInt = int(^uint32(0)) // Maximum value that fits in uint32
-	if max > maxSafeInt {
-		return 0, fmt.Errorf("max value too large for secure generation")
+	if maxVal > maxSafeInt {
+		return 0, fmt.Errorf("maxVal value too large for secure generation")
 	}
 
 	// For small ranges, use a simple approach
-	if max <= 256 {
+	if maxVal <= 256 {
 		var b [1]byte
 		if _, err := rand.Read(b[:]); err != nil {
 			return 0, err
 		}
-		return int(b[0]) % max, nil
+		return int(b[0]) % maxVal, nil
 	}
 
 	// For larger ranges, use rejection sampling to avoid modulo bias
@@ -96,12 +96,12 @@ func secureRandomInt(max int) (int, error) {
 	n := binary.BigEndian.Uint32(buf[:])
 	// Simple rejection sampling to avoid bias
 	maxUint32 := uint32(^uint32(0)) // Maximum uint32 value
-	// Safe conversion - we checked max <= maxSafeInt above
+	// Safe conversion - we checked maxVal <= maxSafeInt above
 	var maxAsUint32 uint32
-	if max >= 0 && max <= maxSafeInt {
-		maxAsUint32 = uint32(max)
+	if maxVal >= 0 && maxVal <= maxSafeInt {
+		maxAsUint32 = uint32(maxVal)
 	} else {
-		return 0, fmt.Errorf("invalid max value for uint32 conversion")
+		return 0, fmt.Errorf("invalid maxVal value for uint32 conversion")
 	}
 	limit := maxUint32 - (maxUint32 % maxAsUint32)
 	for n >= limit {
@@ -111,7 +111,7 @@ func secureRandomInt(max int) (int, error) {
 		n = binary.BigEndian.Uint32(buf[:])
 	}
 
-	return int(n) % max, nil
+	return int(n) % maxVal, nil
 }
 
 // LoadBalancer manages multiple plugins of the same type and distributes load using configurable strategies.
@@ -163,7 +163,20 @@ type LoadBalancer[Req, Resp any] struct {
 	pluginMetrics map[string]*PluginLoadMetrics
 }
 
-// PluginWrapper wraps a plugin with load balancing metadata
+// PluginWrapper wraps a plugin with load balancing metadata.
+//
+// This structure extends plugin instances with load balancing-specific
+// metadata and atomic counters for thread-safe metrics tracking.
+// It enables intelligent routing decisions based on real-time plugin
+// performance and load characteristics.
+//
+// Fields:
+//   - Plugin: The actual plugin instance
+//   - Weight: Relative weight for weighted algorithms (higher = more traffic)
+//   - Priority: Priority level for priority-based routing (higher = preferred)
+//   - Active: Current number of active connections/requests
+//   - Enabled: Whether this plugin instance is currently accepting traffic
+//   - LastUsed: Timestamp of last request (for LRU algorithms)
 type PluginWrapper[Req, Resp any] struct {
 	Plugin   Plugin[Req, Resp]
 	Weight   int
@@ -173,7 +186,19 @@ type PluginWrapper[Req, Resp any] struct {
 	LastUsed *atomic.Int64 // Unix timestamp
 }
 
-// PluginLoadMetrics tracks metrics for load balancing decisions
+// PluginLoadMetrics tracks comprehensive metrics for intelligent load balancing decisions.
+//
+// This structure maintains real-time performance metrics using atomic operations
+// for thread-safe concurrent access. Load balancers use these metrics to make
+// intelligent routing decisions based on current plugin performance and load.
+//
+// All counters are thread-safe and updated atomically during plugin execution:
+//   - Request counters track total traffic and success/failure rates
+//   - Connection tracking enables least-connection algorithms
+//   - Latency measurements support latency-aware routing
+//   - Health scores provide overall plugin wellness assessment
+//
+// Metrics are updated automatically by the load balancer during request processing.
 type PluginLoadMetrics struct {
 	TotalRequests      atomic.Int64
 	SuccessfulRequests atomic.Int64
@@ -185,7 +210,27 @@ type PluginLoadMetrics struct {
 	HealthScore        atomic.Int32 // 0-100 scale
 }
 
-// LoadBalanceRequest contains request information for load balancing
+// LoadBalanceRequest contains request information and context for load balancing decisions.
+//
+// This structure provides load balancers with the necessary context to make
+// intelligent routing decisions, especially for algorithms that depend on
+// request characteristics (like consistent hashing) or user context.
+//
+// Fields:
+//   - RequestID: Unique identifier for request tracking and correlation
+//   - Key: Optional key for consistent hashing algorithms (user ID, session ID, etc.)
+//   - Priority: Request priority level for priority-aware routing
+//   - Metadata: Additional context that routing algorithms can use
+//
+// Example usage:
+//
+//	request := LoadBalanceRequest{
+//	    RequestID: "req-12345",
+//	    Key:       "user-67890",      // For consistent hashing
+//	    Priority:  1,                // Higher priority requests
+//	    Metadata:  map[string]string{"region": "us-east-1"},
+//	}
+//	pluginName, plugin, err := lb.SelectPlugin(request)
 type LoadBalanceRequest struct {
 	RequestID   string
 	Key         string   // For consistent hashing

@@ -8,6 +8,7 @@ package goplugins
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/url"
 	"time"
 )
@@ -460,7 +461,14 @@ func (pc *PluginConfig) validateNetworkTransport() error {
 		return NewMissingEndpointError(pc.Transport)
 	}
 
-	// Validate endpoint URL
+	// Handle gRPC endpoints differently (they use host:port format, not URLs)
+	if pc.Transport == TransportGRPC || pc.Transport == TransportGRPCTLS {
+		// For gRPC, validate host:port format
+		// Basic validation that it's not empty (more detailed validation by gRPC factory)
+		return nil
+	}
+
+	// For HTTP/HTTPS, validate endpoint URL
 	parsed, err := url.Parse(pc.Endpoint)
 	if err != nil {
 		return NewInvalidEndpointURLError(pc.Endpoint, err)
@@ -568,6 +576,7 @@ func (mc *ManagerConfig) Validate() error {
 	names := make(map[string]bool)
 	for i, plugin := range mc.Plugins {
 		if err := plugin.Validate(); err != nil {
+			slog.Error("Plugin validation failed", "plugin_index", i, "plugin_name", plugin.Name, "error", err)
 			return NewPluginValidationError(i, err)
 		}
 

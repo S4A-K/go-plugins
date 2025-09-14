@@ -65,6 +65,34 @@ func (te *TestEnvironment) CreateTempDir(pattern string) string {
 	return tempDir
 }
 
+// TempDir returns the first temporary directory (for backward compatibility)
+func (te *TestEnvironment) TempDir() string {
+	te.mu.Lock()
+	defer te.mu.Unlock()
+
+	if len(te.tempDirs) == 0 {
+		return te.CreateTempDir("go-plugins-test")
+	}
+	return te.tempDirs[0]
+}
+
+// CreateTempFile creates a temporary file with the given name and content
+func (te *TestEnvironment) CreateTempFile(name, content string) string {
+	tempDir := te.CreateTempDir("go-plugins-test")
+	filePath := filepath.Join(tempDir, name)
+
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		te.t.Fatalf("Failed to create temp file %s: %v", filePath, err)
+	}
+
+	return filePath
+}
+
+// CreateTempFileWithContent creates a temporary file with the given name and content
+func (te *TestEnvironment) CreateTempFileWithContent(name, content string) string {
+	return te.CreateTempFile(name, content)
+}
+
 // CreateMockHTTPServer creates a mock HTTP server with request/response logging
 func (te *TestEnvironment) CreateMockHTTPServer(handler http.HandlerFunc) *MockHTTPServer {
 	te.mu.Lock()
@@ -310,7 +338,7 @@ type TestDataFactory struct{}
 func (tdf *TestDataFactory) CreateValidPluginConfig(name string) PluginConfig {
 	return PluginConfig{
 		Name:      name,
-		Type:      "http",
+		Type:      "test",
 		Transport: TransportHTTP,
 		Endpoint:  "http://localhost:8080/api",
 		Priority:  1,
@@ -377,9 +405,9 @@ func (tdf *TestDataFactory) CreateExecutionContext() ExecutionContext {
 }
 
 // AdvancedMockPlugin provides an enhanced mock implementation for complex testing scenarios
-type AdvancedMockPlugin struct {
+type AdvancedMockPlugin[Req, Resp any] struct {
 	name             string
-	executeFunc      func(context.Context, ExecutionContext, interface{}) (interface{}, error)
+	executeFunc      func(context.Context, ExecutionContext, Req) (Resp, error)
 	healthFunc       func(context.Context) HealthStatus
 	infoFunc         func() PluginInfo
 	closeFunc        func() error
@@ -390,52 +418,132 @@ type AdvancedMockPlugin struct {
 }
 
 // NewAdvancedMockPlugin creates a new advanced mock plugin for testing
-func NewAdvancedMockPlugin(name string) *AdvancedMockPlugin {
-	return &AdvancedMockPlugin{
+func NewAdvancedMockPlugin[Req, Resp any](name string) *AdvancedMockPlugin[Req, Resp] {
+	return &AdvancedMockPlugin[Req, Resp]{
 		name: name,
 	}
 }
 
 // SetExecuteFunc sets the execute function for the mock
-func (amp *AdvancedMockPlugin) SetExecuteFunc(fn func(context.Context, ExecutionContext, interface{}) (interface{}, error)) {
+func (amp *AdvancedMockPlugin[Req, Resp]) SetExecuteFunc(fn func(context.Context, ExecutionContext, Req) (Resp, error)) {
 	amp.mu.Lock()
 	defer amp.mu.Unlock()
 	amp.executeFunc = fn
 }
 
 // SetHealthFunc sets the health check function for the mock
-func (amp *AdvancedMockPlugin) SetHealthFunc(fn func(context.Context) HealthStatus) {
+func (amp *AdvancedMockPlugin[Req, Resp]) SetHealthFunc(fn func(context.Context) HealthStatus) {
 	amp.mu.Lock()
 	defer amp.mu.Unlock()
 	amp.healthFunc = fn
 }
 
 // SetInfoFunc sets the info function for the mock
-func (amp *AdvancedMockPlugin) SetInfoFunc(fn func() PluginInfo) {
+func (amp *AdvancedMockPlugin[Req, Resp]) SetInfoFunc(fn func() PluginInfo) {
 	amp.mu.Lock()
 	defer amp.mu.Unlock()
 	amp.infoFunc = fn
 }
 
 // SetCloseFunc sets the close function for the mock
-func (amp *AdvancedMockPlugin) SetCloseFunc(fn func() error) {
+func (amp *AdvancedMockPlugin[Req, Resp]) SetCloseFunc(fn func() error) {
 	amp.mu.Lock()
 	defer amp.mu.Unlock()
 	amp.closeFunc = fn
 }
 
+// Execute implements the Plugin interface Execute method
+func (amp *AdvancedMockPlugin[Req, Resp]) Execute(ctx context.Context, execCtx ExecutionContext, request Req) (Resp, error) {
+	amp.executionCount.Add(1)
+
+	amp.mu.RLock()
+	fn := amp.executeFunc
+	amp.mu.RUnlock()
+
+	if fn != nil {
+		return fn(ctx, execCtx, request)
+	}
+
+	// Default implementation - create zero value response
+	var resp Resp
+	return resp, nil
+}
+
+// Health implements the Plugin interface Health method
+func (amp *AdvancedMockPlugin[Req, Resp]) Health(ctx context.Context) HealthStatus {
+	amp.healthCheckCount.Add(1)
+
+	amp.mu.RLock()
+	fn := amp.healthFunc
+	amp.mu.RUnlock()
+
+	if fn != nil {
+		return fn(ctx)
+	}
+
+	// Default implementation
+	return HealthStatus{
+		Status:       StatusHealthy,
+		Message:      "Mock plugin is healthy",
+		LastCheck:    time.Now(),
+		ResponseTime: 1 * time.Millisecond,
+		Metadata: map[string]string{
+			"plugin": amp.name,
+			"mock":   "true",
+		},
+	}
+}
+
+// Info implements the Plugin interface Info method
+func (amp *AdvancedMockPlugin[Req, Resp]) Info() PluginInfo {
+	amp.mu.RLock()
+	fn := amp.infoFunc
+	amp.mu.RUnlock()
+
+	if fn != nil {
+		return fn()
+	}
+
+	// Default implementation
+	return PluginInfo{
+		Name:         amp.name,
+		Version:      "1.0.0-mock",
+		Description:  "Advanced mock plugin for testing",
+		Author:       "go-plugins test suite",
+		Capabilities: []string{"mock", "test"},
+		Metadata: map[string]string{
+			"transport": "http",
+			"mock":      "true",
+		},
+	}
+}
+
+// Close implements the Plugin interface Close method
+func (amp *AdvancedMockPlugin[Req, Resp]) Close() error {
+	if amp.closed.CompareAndSwap(false, true) {
+		amp.mu.RLock()
+		fn := amp.closeFunc
+		amp.mu.RUnlock()
+
+		if fn != nil {
+			return fn()
+		}
+	}
+	return nil
+}
+
 // GetExecutionCount returns the number of times Execute was called
-func (amp *AdvancedMockPlugin) GetExecutionCount() int64 {
+func (amp *AdvancedMockPlugin[Req, Resp]) GetExecutionCount() int64 {
 	return amp.executionCount.Load()
 }
 
 // GetHealthCheckCount returns the number of times Health was called
-func (amp *AdvancedMockPlugin) GetHealthCheckCount() int64 {
+func (amp *AdvancedMockPlugin[Req, Resp]) GetHealthCheckCount() int64 {
 	return amp.healthCheckCount.Load()
 }
 
 // IsClosed returns true if the plugin has been closed
-func (amp *AdvancedMockPlugin) IsClosed() bool {
+func (amp *AdvancedMockPlugin[Req, Resp]) IsClosed() bool {
 	return amp.closed.Load()
 }
 

@@ -6,9 +6,9 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/agilira/go-plugins?v=2)](https://goreportcard.com/report/github.com/agilira/go-plugins)
 [![Coverage](https://codecov.io/gh/agilira/orpheus/branch/main/graph/badge.svg)](https://codecov.io/gh/agilira/go-plugins)
 
-go-plugins provides a production-ready, type-safe plugin architecture for Go applications. It supports multiple transport protocols (HTTP, gRPC, Unix sockets) with built-in circuit breaking, health monitoring, authentication, and graceful degradation.
+go-plugins provides a production-ready, type-safe plugin architecture for Go applications. It supports multiple transport protocols (HTTP, gRPC, Unix sockets) with built-in circuit breaking, health monitoring, authentication, graceful degradation & hot reload powered by [Argus](https://github.com/agilira/argus) (12.10ns/op).
 
-**[Features](#features) • [Quick Start](#quick-start) • [Usage](#usage) •  [Observability](#observability) • [Examples](#examples) • [API Reference](#api-reference)**
+**[Features](#features) • [Quick Start](#quick-start) • [Usage](#usage) •  [Observability](#observability) • [Examples](#examples) • [Documentation](#documentation) • [API Reference](#api-reference)**
 
 ## Features
 
@@ -18,14 +18,14 @@ go-plugins provides a production-ready, type-safe plugin architecture for Go app
 - **Health Monitoring**: Continuous health checking with automatic plugin status management
 - **Load Balancing**: Multiple algorithms including round-robin, least connections, and weighted random
 - **Authentication**: Support for API keys, Bearer tokens, Basic auth, mTLS, and custom methods
-- **Hot Reload**: Intelligent configuration reloading with graceful connection draining
+- **Hot Reload**: Ultra-fast configuration reloading powered by [Argus](https://github.com/agilira/argus) with graceful connection draining
 - **Rate Limiting**: Token bucket rate limiting to prevent overwhelming plugins
 - **Observability**: Comprehensive metrics collection and structured logging
 - **Connection Pooling**: Efficient resource management with configurable connection limits
 
 ## Compatibility and Support
 
-go-plugins is designed for Go 1.24+ environments and follows Long-Term Support guidelines to ensure consistent performance across production deployments.
+go-plugins is designed for Go 1.25+ environments and follows Long-Term Support guidelines to ensure consistent performance across production deployments.
 
 ## Quick Start
 
@@ -317,6 +317,23 @@ config := goplugins.ManagerConfig{
     },
 }
 ```
+
+## Documentation
+
+### Plugin Configuration Guides
+- **[Plugin Requirements Guide](./docs/PLUGIN_REQUIREMENTS.md)**: Complete guide to plugin configuration requirements and best practices
+- **[Quick Reference](./docs/QUICK_REFERENCE.md)**: Fast lookup for common plugin configurations and troubleshooting
+
+### Key Topics Covered
+- **Required vs Optional Fields**: What every plugin configuration must have
+- **Transport-Specific Requirements**: HTTP, gRPC, Unix sockets, and executable plugins  
+- **Authentication Setup**: API keys, Bearer tokens, Basic auth, mTLS configuration
+- **Hot Reload Configuration**: Argus integration requirements and best practices
+- **Common Pitfalls**: Error codes, validation failures, and their solutions
+- **Performance Optimization**: Connection pooling, rate limiting, circuit breakers
+- **Testing Best Practices**: Deterministic testing patterns and configurations
+
+> **Tip**: Start with the [Quick Reference](./docs/QUICK_REFERENCE.md) for immediate help, then dive into the [comprehensive guide](./docs/PLUGIN_REQUIREMENTS.md) for detailed explanations.
 
 ## API Reference
 

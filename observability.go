@@ -22,7 +22,27 @@ import (
 	"github.com/agilira/go-timecache"
 )
 
-// MetricsCollector defines interface for collecting plugin metrics
+// MetricsCollector defines the core interface for collecting plugin metrics across different providers.
+//
+// This interface provides a standardized way to collect performance and operational
+// metrics from plugins, supporting various backend systems like Prometheus, StatsD,
+// or custom metrics solutions. It enables consistent metric collection regardless
+// of the underlying metrics infrastructure.
+//
+// Supported metric types:
+//   - Counter: Monotonically increasing values (requests, errors, operations)
+//   - Gauge: Current state values (active connections, memory usage, queue depth)
+//   - Histogram: Distribution of values (response times, request sizes, processing duration)
+//   - Custom: Provider-specific metrics with flexible value types
+//
+// Example usage:
+//
+//	collector.IncrementCounter("plugin_requests_total",
+//	    map[string]string{"plugin": "auth", "method": "validate"}, 1)
+//	collector.SetGauge("plugin_connections_active",
+//	    map[string]string{"plugin": "database"}, 42)
+//	collector.RecordHistogram("plugin_response_time_seconds",
+//	    map[string]string{"plugin": "api"}, 0.125)
 type MetricsCollector interface {
 	// Counter metrics
 	IncrementCounter(name string, labels map[string]string, value int64)
@@ -40,8 +60,28 @@ type MetricsCollector interface {
 	GetMetrics() map[string]interface{}
 }
 
-// EnhancedMetricsCollector extends MetricsCollector with native label support
-// This interface is designed to be compatible with Prometheus and other modern metrics systems
+// EnhancedMetricsCollector extends MetricsCollector with native label support and type safety.
+//
+// This interface is designed to be compatible with Prometheus and other modern metrics
+// systems that support strongly-typed metrics with predefined label schemas. It provides
+// better performance and type safety compared to the basic MetricsCollector interface
+// by avoiding map allocations and string-based label handling.
+//
+// Key advantages:
+//   - Type-safe metric creation with predefined label names
+//   - Better performance through reduced allocations
+//   - Prometheus-compatible metric definitions
+//   - Compile-time validation of metric usage
+//
+// Example usage:
+//
+//	counter := collector.CounterWithLabels("plugin_requests_total",
+//	    "Total plugin requests", "plugin", "method", "status")
+//	counter.With("auth", "validate", "success").Inc()
+//
+//	gauge := collector.GaugeWithLabels("plugin_connections",
+//	    "Active plugin connections", "plugin")
+//	gauge.With("database").Set(42)
 type EnhancedMetricsCollector interface {
 	MetricsCollector // Embed the original interface for backward compatibility
 
@@ -117,6 +157,10 @@ type Span interface {
 }
 
 // SpanStatusCode represents span status
+// SpanStatusCode represents the status of a distributed tracing span.
+//
+// These status codes are used to categorize the outcome of operations
+// for distributed tracing analysis and monitoring dashboards.
 type SpanStatusCode int
 
 const (
@@ -695,23 +739,23 @@ func (dmc *DefaultMetricsCollector) GetMetrics() map[string]interface{} {
 		if len(v) > 0 {
 			// Calculate basic histogram stats
 			sum := 0.0
-			min := v[0]
-			max := v[0]
+			minVal := v[0]
+			maxVal := v[0]
 
 			for _, val := range v {
 				sum += val
-				if val < min {
-					min = val
+				if val < minVal {
+					minVal = val
 				}
-				if val > max {
-					max = val
+				if val > maxVal {
+					maxVal = val
 				}
 			}
 
 			metrics[k+"_count"] = len(v)
 			metrics[k+"_sum"] = sum
-			metrics[k+"_min"] = min
-			metrics[k+"_max"] = max
+			metrics[k+"_min"] = minVal
+			metrics[k+"_max"] = maxVal
 			metrics[k+"_avg"] = sum / float64(len(v))
 		}
 	}

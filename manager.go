@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/agilira/argus"
 )
 
 // Manager implements PluginManager with comprehensive production-ready features.
@@ -80,6 +82,9 @@ type Manager[Req, Resp any] struct {
 	// Health monitoring
 	healthCheckers map[string]*HealthChecker
 	healthStatus   map[string]HealthStatus
+
+	// Dynamic configuration powered by Argus (replaces old hot-reload system)
+	configWatcher *ConfigWatcher[Req, Resp]
 
 	// Concurrency control
 	mu       sync.RWMutex
@@ -413,42 +418,12 @@ func (m *Manager[Req, Resp]) LoadFromConfig(config ManagerConfig) error {
 	return nil
 }
 
-// ReloadConfig implements PluginManager.ReloadConfig
+// ReloadConfig implements PluginManager.ReloadConfig with simple recreation strategy
 func (m *Manager[Req, Resp]) ReloadConfig(config ManagerConfig) error {
-	// For backward compatibility, use simple reload by default
-	// Users can use PluginReloader for intelligent hot-reload
-	return m.ReloadConfigWithStrategy(config, ReloadStrategyRecreate)
-}
-
-// ReloadConfigWithStrategy reloads configuration with specified strategy
-func (m *Manager[Req, Resp]) ReloadConfigWithStrategy(config ManagerConfig, strategy ReloadStrategy) error {
 	if err := config.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	switch strategy {
-	case ReloadStrategyRecreate:
-		return m.reloadConfigRecreate(config)
-	case ReloadStrategyGraceful, ReloadStrategyRolling:
-		// Use the intelligent reloader
-		reloader := NewPluginReloader(m, ReloadOptions{
-			Strategy:             strategy,
-			DrainTimeout:         30 * time.Second,
-			GracefulTimeout:      60 * time.Second,
-			MaxConcurrentReloads: 3,
-			HealthCheckTimeout:   10 * time.Second,
-			RollbackOnFailure:    true,
-		}, m.logger)
-
-		ctx := context.Background()
-		return reloader.ReloadWithIntelligentDiff(ctx, config)
-	default:
-		return fmt.Errorf("unsupported reload strategy: %s", strategy)
-	}
-}
-
-// reloadConfigRecreate implements simple recreation strategy
-func (m *Manager[Req, Resp]) reloadConfigRecreate(config ManagerConfig) error {
 	// Get current plugin names
 	m.mu.RLock()
 	currentPlugins := make([]string, 0, len(m.plugins))
@@ -469,6 +444,78 @@ func (m *Manager[Req, Resp]) reloadConfigRecreate(config ManagerConfig) error {
 	return m.LoadFromConfig(config)
 }
 
+// EnableDynamicConfiguration starts Argus-powered hot reload for the given config file
+// This replaces the old hot-reload system with ultra-fast Argus monitoring (12.10ns/op)
+//
+// Parameters:
+//   - configPath: Path to JSON configuration file to watch
+//   - options: Dynamic config options (use DefaultDynamicConfigOptions() for defaults)
+//
+// Example:
+//
+//	manager := NewManager[MyRequest, MyResponse](logger)
+//
+//	// Enable Argus-powered hot reload
+//	if err := manager.EnableDynamicConfiguration("config.json", DefaultDynamicConfigOptions()); err != nil {
+//		log.Printf("Hot reload disabled: %v", err)
+//	} else {
+//		log.Println("✅ Ultra-fast Argus hot reload enabled!")
+//	}
+//
+//	defer manager.DisableDynamicConfiguration() // Clean shutdown
+func (m *Manager[Req, Resp]) EnableDynamicConfiguration(configPath string, options DynamicConfigOptions) error {
+	if m.configWatcher != nil {
+		return fmt.Errorf("dynamic configuration is already enabled")
+	}
+
+	watcher, err := NewConfigWatcher(m, configPath, options, m.logger)
+	if err != nil {
+		return fmt.Errorf("failed to create config watcher: %w", err)
+	}
+
+	ctx := context.Background()
+	if err := watcher.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start config watcher: %w", err)
+	}
+
+	m.configWatcher = watcher
+	m.logger.Info("Argus dynamic configuration enabled",
+		"config_path", configPath,
+		"strategy", options.ReloadStrategy,
+		"poll_interval", options.PollInterval)
+
+	return nil
+}
+
+// DisableDynamicConfiguration stops Argus-powered hot reload
+func (m *Manager[Req, Resp]) DisableDynamicConfiguration() error {
+	if m.configWatcher == nil {
+		return fmt.Errorf("dynamic configuration is not enabled")
+	}
+
+	if err := m.configWatcher.Stop(); err != nil {
+		return fmt.Errorf("failed to stop config watcher: %w", err)
+	}
+
+	m.configWatcher = nil
+	m.logger.Info("Argus dynamic configuration disabled")
+	return nil
+}
+
+// IsDynamicConfigurationEnabled returns true if Argus hot reload is active
+func (m *Manager[Req, Resp]) IsDynamicConfigurationEnabled() bool {
+	return m.configWatcher != nil && m.configWatcher.IsRunning()
+}
+
+// GetDynamicConfigurationStats returns Argus watcher performance statistics
+func (m *Manager[Req, Resp]) GetDynamicConfigurationStats() *argus.CacheStats {
+	if m.configWatcher == nil {
+		return nil
+	}
+	stats := m.configWatcher.GetWatcherStats()
+	return &stats
+}
+
 // Health implements PluginManager.Health
 func (m *Manager[Req, Resp]) Health() map[string]HealthStatus {
 	return m.ListPlugins()
@@ -481,6 +528,13 @@ func (m *Manager[Req, Resp]) Shutdown(ctx context.Context) error {
 	}
 
 	m.logger.Info("Shutting down plugin manager")
+
+	// Stop Argus config watcher first
+	if m.configWatcher != nil {
+		if err := m.configWatcher.Stop(); err != nil {
+			m.logger.Warn("Failed to stop config watcher", "error", err)
+		}
+	}
 
 	// Stop all health checkers
 	m.mu.Lock()
@@ -530,6 +584,19 @@ func (m *Manager[Req, Resp]) RegisterFactory(pluginType string, factory PluginFa
 
 	m.factories[pluginType] = factory
 	return nil
+}
+
+// GetFactory retrieves a plugin factory by type
+func (m *Manager[Req, Resp]) GetFactory(pluginType string) (PluginFactory[Req, Resp], error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	factory, exists := m.factories[pluginType]
+	if !exists {
+		return nil, fmt.Errorf("no factory registered for plugin type: %s", pluginType)
+	}
+
+	return factory, nil
 }
 
 // GetMetrics returns current operational metrics
@@ -592,10 +659,10 @@ func generateRequestID() string {
 	return fmt.Sprintf("req_%d", time.Now().UnixNano())
 }
 
-func calculateBackoff(attempt int, initial, max time.Duration, multiplier float64) time.Duration {
+func calculateBackoff(attempt int, initial, maxDuration time.Duration, multiplier float64) time.Duration {
 	duration := time.Duration(float64(initial) * pow(multiplier, float64(attempt)))
-	if duration > max {
-		duration = max
+	if duration > maxDuration {
+		duration = maxDuration
 	}
 	return duration
 }

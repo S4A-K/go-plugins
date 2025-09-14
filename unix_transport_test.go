@@ -46,7 +46,9 @@ func createShortSocketPath(t *testing.T) string {
 	}
 
 	socketPath := tmpFile.Name()
-	tmpFile.Close()
+	if err := tmpFile.Close(); err != nil {
+		t.Logf("Warning: failed to close temp file: %v", err)
+	}
 
 	// Remove the file so we can use the path for socket
 	if err := os.Remove(socketPath); err != nil {
@@ -1019,7 +1021,9 @@ func createShortSocketPathForBenchmark(b *testing.B) string {
 	}
 
 	socketPath := tmpFile.Name()
-	tmpFile.Close()
+	if err := tmpFile.Close(); err != nil {
+		b.Logf("Warning: failed to close temp file: %v", err)
+	}
 
 	// Remove the file so we can use the path for socket
 	if err := os.Remove(socketPath); err != nil {

@@ -489,21 +489,16 @@ func validatePOST201Metric(metric PrometheusMetric) bool {
 	return false
 }
 
-// testEnhancedGaugeWithLabels tests gauge functionality with labels
-func testEnhancedGaugeWithLabels(t *testing.T, collector EnhancedMetricsCollector) {
-	gauge := collector.GaugeWithLabels("system_memory", "System memory usage", "type")
-	if gauge == nil {
-		t.Fatal("GaugeWithLabels returned nil")
-	}
-
-	// Test gauge operations
+// performGaugeOperations performs various gauge operations for testing
+func performGaugeOperations(gauge GaugeMetric) {
 	gauge.Set(1024.5, "heap")
 	gauge.Inc("stack")         // Should increment from 0 to 1
 	gauge.Add(512.25, "stack") // Should be 513.25 total
 	gauge.Dec("heap")          // Should decrement to 1023.5
+}
 
-	promMetrics := collector.GetPrometheusMetrics()
-
+// validateGaugeMetrics validates gauge metrics in Prometheus output
+func validateGaugeMetrics(t *testing.T, promMetrics []PrometheusMetric) {
 	heapFound := false
 	stackFound := false
 
@@ -532,6 +527,58 @@ func testEnhancedGaugeWithLabels(t *testing.T, collector EnhancedMetricsCollecto
 	}
 }
 
+// testEnhancedGaugeWithLabels tests gauge functionality with labels
+func testEnhancedGaugeWithLabels(t *testing.T, collector EnhancedMetricsCollector) {
+	gauge := collector.GaugeWithLabels("system_memory", "System memory usage", "type")
+	if gauge == nil {
+		t.Fatal("GaugeWithLabels returned nil")
+	}
+
+	performGaugeOperations(gauge)
+	promMetrics := collector.GetPrometheusMetrics()
+	validateGaugeMetrics(t, promMetrics)
+}
+
+// recordHistogramObservations records test observations for histogram testing
+func recordHistogramObservations(histogram HistogramMetric) {
+	observations := []float64{0.05, 0.3, 0.8, 1.5, 3.2, 7.1}
+	for _, obs := range observations {
+		histogram.Observe(obs, "auth")
+	}
+}
+
+// validateHistogramStructure validates histogram bucket structure and counts
+func validateHistogramStructure(t *testing.T, metric PrometheusMetric, buckets []float64) {
+	// Verify bucket structure
+	if len(metric.Buckets) != len(buckets)+1 { // +1 for +Inf bucket
+		t.Errorf("Expected %d buckets, got %d", len(buckets)+1, len(metric.Buckets))
+		return
+	}
+
+	// Verify bucket counts (observations <= bucket upper bound)
+	expectedCounts := []uint64{1, 2, 3, 4, 5, 6} // cumulative counts
+	for i, bucket := range metric.Buckets {
+		if i < len(expectedCounts) && bucket.Count != expectedCounts[i] {
+			t.Errorf("Bucket %f: expected count %d, got %d", bucket.UpperBound, expectedCounts[i], bucket.Count)
+		}
+	}
+}
+
+// findAndValidateHistogram finds and validates histogram metrics in Prometheus output
+func findAndValidateHistogram(t *testing.T, promMetrics []PrometheusMetric, buckets []float64) {
+	histogramFound := false
+	for _, metric := range promMetrics {
+		if metric.Name == "request_latency" && metric.Type == "histogram" && metric.Labels["service"] == "auth" {
+			histogramFound = true
+			validateHistogramStructure(t, metric, buckets)
+		}
+	}
+
+	if !histogramFound {
+		t.Error("Histogram metric not found in Prometheus output")
+	}
+}
+
 // testEnhancedHistogramWithLabels tests histogram functionality with labels
 func testEnhancedHistogramWithLabels(t *testing.T, collector EnhancedMetricsCollector) {
 	buckets := []float64{0.1, 0.5, 1.0, 2.5, 5.0}
@@ -540,38 +587,9 @@ func testEnhancedHistogramWithLabels(t *testing.T, collector EnhancedMetricsColl
 		t.Fatal("HistogramWithLabels returned nil")
 	}
 
-	// Record observations
-	observations := []float64{0.05, 0.3, 0.8, 1.5, 3.2, 7.1}
-	for _, obs := range observations {
-		histogram.Observe(obs, "auth")
-	}
-
+	recordHistogramObservations(histogram)
 	promMetrics := collector.GetPrometheusMetrics()
-
-	histogramFound := false
-	for _, metric := range promMetrics {
-		if metric.Name == "request_latency" && metric.Type == "histogram" && metric.Labels["service"] == "auth" {
-			histogramFound = true
-
-			// Verify bucket structure
-			if len(metric.Buckets) != len(buckets)+1 { // +1 for +Inf bucket
-				t.Errorf("Expected %d buckets, got %d", len(buckets)+1, len(metric.Buckets))
-				continue
-			}
-
-			// Verify bucket counts (observations <= bucket upper bound)
-			expectedCounts := []uint64{1, 2, 3, 4, 5, 6} // cumulative counts
-			for i, bucket := range metric.Buckets {
-				if i < len(expectedCounts) && bucket.Count != expectedCounts[i] {
-					t.Errorf("Bucket %f: expected count %d, got %d", bucket.UpperBound, expectedCounts[i], bucket.Count)
-				}
-			}
-		}
-	}
-
-	if !histogramFound {
-		t.Error("Histogram metric not found in Prometheus output")
-	}
+	findAndValidateHistogram(t, promMetrics, buckets)
 }
 
 // TestEnhancedMetricsCollector_Implementation tests the enhanced metrics collector
@@ -712,11 +730,8 @@ func TestErrorCategorization_Functions(t *testing.T) {
 
 // Helper functions for TestObservabilityConfig_Defaults to reduce cyclomatic complexity
 
-// testDefaultObservabilityConfig tests default configuration values
-func testDefaultObservabilityConfig(t *testing.T) {
-	config := DefaultObservabilityConfig()
-
-	// Verify default values
+// validateDefaultMetricsConfig validates default metrics configuration
+func validateDefaultMetricsConfig(t *testing.T, config ObservabilityConfig) {
 	if !config.MetricsEnabled {
 		t.Error("Metrics should be enabled by default")
 	}
@@ -726,12 +741,20 @@ func testDefaultObservabilityConfig(t *testing.T) {
 	if config.MetricsPrefix != "goplugins" {
 		t.Errorf("Expected default metrics prefix 'goplugins', got %s", config.MetricsPrefix)
 	}
+}
+
+// validateDefaultTracingConfig validates default tracing configuration
+func validateDefaultTracingConfig(t *testing.T, config ObservabilityConfig) {
 	if config.TracingEnabled {
 		t.Error("Tracing should be disabled by default")
 	}
 	if config.TracingSampleRate != 0.1 {
 		t.Errorf("Expected default tracing sample rate 0.1, got %f", config.TracingSampleRate)
 	}
+}
+
+// validateDefaultLoggingConfig validates default logging configuration
+func validateDefaultLoggingConfig(t *testing.T, config ObservabilityConfig) {
 	if !config.LoggingEnabled {
 		t.Error("Logging should be enabled by default")
 	}
@@ -741,9 +764,23 @@ func testDefaultObservabilityConfig(t *testing.T) {
 	if !config.StructuredLogging {
 		t.Error("Structured logging should be enabled by default")
 	}
+}
+
+// validateDefaultMetricTypes validates default metric types configuration
+func validateDefaultMetricTypes(t *testing.T, config ObservabilityConfig) {
 	if !config.HealthMetrics || !config.PerformanceMetrics || !config.ErrorMetrics {
 		t.Error("All metric types should be enabled by default")
 	}
+}
+
+// testDefaultObservabilityConfig tests default configuration values
+func testDefaultObservabilityConfig(t *testing.T) {
+	config := DefaultObservabilityConfig()
+
+	validateDefaultMetricsConfig(t, config)
+	validateDefaultTracingConfig(t, config)
+	validateDefaultLoggingConfig(t, config)
+	validateDefaultMetricTypes(t, config)
 }
 
 // testEnhancedObservabilityConfig tests enhanced configuration values
@@ -981,52 +1018,61 @@ func TestObservableManager_LatencyRecording(t *testing.T) {
 	})
 
 	t.Run("MultipleLatencyRecords", func(t *testing.T) {
-		pluginName2 := "latency-multi-test-plugin"
-		observableManager.ensurePluginMetrics(pluginName2)
-
-		latencies := []time.Duration{
-			50 * time.Millisecond,
-			200 * time.Millisecond,
-			75 * time.Millisecond,
-			300 * time.Millisecond,
-			125 * time.Millisecond,
-		}
-
-		// Record multiple latencies
-		for _, lat := range latencies {
-			observableManager.recordLatency(pluginName2, lat)
-		}
-
-		metrics := observableManager.getPluginMetrics(pluginName2)
-
-		// Calculate expected values
-		var totalNs int64
-		minNs := latencies[0].Nanoseconds()
-		maxNs := latencies[0].Nanoseconds()
-
-		for _, lat := range latencies {
-			ns := lat.Nanoseconds()
-			totalNs += ns
-			if ns < minNs {
-				minNs = ns
-			}
-			if ns > maxNs {
-				maxNs = ns
-			}
-		}
-
-		if metrics.TotalLatency.Load() != totalNs {
-			t.Errorf("Expected total latency %d ns, got %d ns", totalNs, metrics.TotalLatency.Load())
-		}
-
-		if metrics.MinLatency.Load() != minNs {
-			t.Errorf("Expected min latency %d ns, got %d ns", minNs, metrics.MinLatency.Load())
-		}
-
-		if metrics.MaxLatency.Load() != maxNs {
-			t.Errorf("Expected max latency %d ns, got %d ns", maxNs, metrics.MaxLatency.Load())
-		}
+		testMultipleLatencyRecords(t, observableManager)
 	})
+}
+
+// testMultipleLatencyRecords tests recording multiple latencies and validates metrics
+func testMultipleLatencyRecords(t *testing.T, observableManager *ObservableManager[TestRequest, TestResponse]) {
+	pluginName2 := "latency-multi-test-plugin"
+	observableManager.ensurePluginMetrics(pluginName2)
+
+	latencies := []time.Duration{
+		50 * time.Millisecond,
+		200 * time.Millisecond,
+		75 * time.Millisecond,
+		300 * time.Millisecond,
+		125 * time.Millisecond,
+	}
+
+	// Record multiple latencies
+	for _, lat := range latencies {
+		observableManager.recordLatency(pluginName2, lat)
+	}
+
+	metrics := observableManager.getPluginMetrics(pluginName2)
+	validateLatencyCalculations(t, metrics, latencies)
+}
+
+// validateLatencyCalculations validates calculated latency metrics
+func validateLatencyCalculations(t *testing.T, metrics *PluginObservabilityMetrics, latencies []time.Duration) {
+	// Calculate expected values
+	var totalNs int64
+	minNs := latencies[0].Nanoseconds()
+	maxNs := latencies[0].Nanoseconds()
+
+	for _, lat := range latencies {
+		ns := lat.Nanoseconds()
+		totalNs += ns
+		if ns < minNs {
+			minNs = ns
+		}
+		if ns > maxNs {
+			maxNs = ns
+		}
+	}
+
+	if metrics.TotalLatency.Load() != totalNs {
+		t.Errorf("Expected total latency %d ns, got %d ns", totalNs, metrics.TotalLatency.Load())
+	}
+
+	if metrics.MinLatency.Load() != minNs {
+		t.Errorf("Expected min latency %d ns, got %d ns", minNs, metrics.MinLatency.Load())
+	}
+
+	if metrics.MaxLatency.Load() != maxNs {
+		t.Errorf("Expected max latency %d ns, got %d ns", maxNs, metrics.MaxLatency.Load())
+	}
 }
 
 // TestObservableManager_ErrorRecording tests error recording and categorization
@@ -1069,51 +1115,48 @@ func TestObservableManager_ErrorRecording(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Get initial metrics
-			initialMetrics := observableManager.getPluginMetrics(pluginName)
-
-			var initialCount int64
-			switch tc.expectedCounter {
-			case "TimeoutErrors":
-				initialCount = initialMetrics.TimeoutErrors.Load()
-			case "ConnectionErrors":
-				initialCount = initialMetrics.ConnectionErrors.Load()
-			case "AuthErrors":
-				initialCount = initialMetrics.AuthErrors.Load()
-			case "OtherErrors":
-				initialCount = initialMetrics.OtherErrors.Load()
-			}
-
-			// Record the error
-			observableManager.recordError(pluginName, tc.err)
-
-			// Check that the appropriate counter was incremented
-			var newCount int64
-			switch tc.expectedCounter {
-			case "TimeoutErrors":
-				newCount = initialMetrics.TimeoutErrors.Load()
-			case "ConnectionErrors":
-				newCount = initialMetrics.ConnectionErrors.Load()
-			case "AuthErrors":
-				newCount = initialMetrics.AuthErrors.Load()
-			case "OtherErrors":
-				newCount = initialMetrics.OtherErrors.Load()
-			}
-
-			if newCount != initialCount+1 {
-				t.Errorf("%s counter should have incremented by 1, got %d -> %d", tc.expectedCounter, initialCount, newCount)
-			}
+			testErrorCounterIncrement(t, observableManager, pluginName, tc.err, tc.expectedCounter)
 		})
+	}
+}
+
+// testErrorCounterIncrement tests that error counters increment correctly
+func testErrorCounterIncrement(t *testing.T, observableManager *ObservableManager[TestRequest, TestResponse], pluginName string, err error, expectedCounter string) {
+	// Get initial metrics
+	initialMetrics := observableManager.getPluginMetrics(pluginName)
+	initialCount := getErrorCounterValue(initialMetrics, expectedCounter)
+
+	// Record the error
+	observableManager.recordError(pluginName, err)
+
+	// Check that the appropriate counter was incremented
+	newCount := getErrorCounterValue(initialMetrics, expectedCounter)
+
+	if newCount != initialCount+1 {
+		t.Errorf("%s counter should have incremented by 1, got %d -> %d", expectedCounter, initialCount, newCount)
+	}
+}
+
+// getErrorCounterValue gets the value of a specific error counter
+func getErrorCounterValue(metrics *PluginObservabilityMetrics, counterName string) int64 {
+	switch counterName {
+	case "TimeoutErrors":
+		return metrics.TimeoutErrors.Load()
+	case "ConnectionErrors":
+		return metrics.ConnectionErrors.Load()
+	case "AuthErrors":
+		return metrics.AuthErrors.Load()
+	case "OtherErrors":
+		return metrics.OtherErrors.Load()
+	default:
+		return 0
 	}
 }
 
 // Helper function for TestObservableManager_MetricsReporting to reduce cyclomatic complexity
 
-// testObservableManagerGetObservabilityMetrics tests metrics reporting functionality
-func testObservableManagerGetObservabilityMetrics(t *testing.T, observableManager *ObservableManager[TestRequest, TestResponse], pluginName string) {
-	report := observableManager.GetObservabilityMetrics()
-
-	// Check report structure
+// validateObservabilityReportStructure validates basic report structure
+func validateObservabilityReportStructure(t *testing.T, report ObservabilityReport) {
 	if report.GeneratedAt.IsZero() {
 		t.Error("GeneratedAt should be set")
 	}
@@ -1121,19 +1164,17 @@ func testObservableManagerGetObservabilityMetrics(t *testing.T, observableManage
 	if report.UpTime < 0 {
 		t.Error("UpTime should be non-negative")
 	}
+}
 
-	// Check global metrics
+// validateGlobalMetrics validates global metrics in observability report
+func validateGlobalMetrics(t *testing.T, report ObservabilityReport, observableManager *ObservableManager[TestRequest, TestResponse]) {
 	if report.Global.TotalRequests == 0 && observableManager.totalRequests.Load() > 0 {
 		t.Error("Global total requests should reflect manager state")
 	}
+}
 
-	// Check plugin metrics
-	pluginReport, exists := report.Plugins[pluginName]
-	if !exists {
-		t.Errorf("Plugin %s should exist in report", pluginName)
-		return
-	}
-
+// validatePluginRequestMetrics validates plugin request-related metrics
+func validatePluginRequestMetrics(t *testing.T, pluginReport PluginMetricsReport) {
 	if pluginReport.TotalRequests != 10 {
 		t.Errorf("Expected 10 total requests, got %d", pluginReport.TotalRequests)
 	}
@@ -1150,7 +1191,10 @@ func testObservableManagerGetObservabilityMetrics(t *testing.T, observableManage
 	if math.Abs(pluginReport.SuccessRate-expectedSuccessRate) > 0.1 {
 		t.Errorf("Expected success rate %.1f%%, got %.1f%%", expectedSuccessRate, pluginReport.SuccessRate)
 	}
+}
 
+// validatePluginErrorMetrics validates plugin error-related metrics
+func validatePluginErrorMetrics(t *testing.T, pluginReport PluginMetricsReport) {
 	if pluginReport.TimeoutErrors != 1 {
 		t.Errorf("Expected 1 timeout error, got %d", pluginReport.TimeoutErrors)
 	}
@@ -1158,6 +1202,24 @@ func testObservableManagerGetObservabilityMetrics(t *testing.T, observableManage
 	if pluginReport.ConnectionErrors != 1 {
 		t.Errorf("Expected 1 connection error, got %d", pluginReport.ConnectionErrors)
 	}
+}
+
+// testObservableManagerGetObservabilityMetrics tests metrics reporting functionality
+func testObservableManagerGetObservabilityMetrics(t *testing.T, observableManager *ObservableManager[TestRequest, TestResponse], pluginName string) {
+	report := observableManager.GetObservabilityMetrics()
+
+	validateObservabilityReportStructure(t, report)
+	validateGlobalMetrics(t, report, observableManager)
+
+	// Check plugin metrics
+	pluginReport, exists := report.Plugins[pluginName]
+	if !exists {
+		t.Errorf("Plugin %s should exist in report", pluginName)
+		return
+	}
+
+	validatePluginRequestMetrics(t, pluginReport)
+	validatePluginErrorMetrics(t, pluginReport)
 }
 
 // TestObservableManager_MetricsReporting tests metrics reporting functionality
@@ -1225,31 +1287,39 @@ func testCommonMetricsSuccessfulRequest(t *testing.T, collector EnhancedMetricsC
 	}
 }
 
-// testCommonMetricsFailedRequest tests failed request recording
-func testCommonMetricsFailedRequest(t *testing.T, collector EnhancedMetricsCollector, commonMetrics *CommonPluginMetrics, pluginName string) {
-	duration := 200 * time.Millisecond
-	err := goerrors.New(ErrCodePluginTimeout, "Request timeout")
+// validateErrorCountMetric validates plugin_errors_total metric
+func validateErrorCountMetric(t *testing.T, metric PrometheusMetric, pluginName string) bool {
+	if metric.Name == "plugin_errors_total" && metric.Labels["plugin_name"] == pluginName && metric.Labels["error_type"] == "timeout" {
+		if metric.Value != 1 {
+			t.Errorf("Expected error count 1, got %f", metric.Value)
+		}
+		return true
+	}
+	return false
+}
 
-	// Record a failed request
-	commonMetrics.RecordRequest(pluginName, duration, err)
+// validateRequestCountMetric validates plugin_requests_total metric
+func validateRequestCountMetric(t *testing.T, metric PrometheusMetric, pluginName string) bool {
+	if metric.Name == "plugin_requests_total" && metric.Labels["plugin_name"] == pluginName && metric.Labels["status"] == "error" {
+		if metric.Value != 1 {
+			t.Errorf("Expected error request count 1, got %f", metric.Value)
+		}
+		return true
+	}
+	return false
+}
 
-	promMetrics := collector.GetPrometheusMetrics()
-
+// validateErrorMetrics validates error count metrics in Prometheus output
+func validateErrorMetrics(t *testing.T, promMetrics []PrometheusMetric, pluginName string) {
 	foundErrorCount := false
 	foundRequestCount := false
 
 	for _, metric := range promMetrics {
-		if metric.Name == "plugin_errors_total" && metric.Labels["plugin_name"] == pluginName && metric.Labels["error_type"] == "timeout" {
+		if validateErrorCountMetric(t, metric, pluginName) {
 			foundErrorCount = true
-			if metric.Value != 1 {
-				t.Errorf("Expected error count 1, got %f", metric.Value)
-			}
 		}
-		if metric.Name == "plugin_requests_total" && metric.Labels["plugin_name"] == pluginName && metric.Labels["status"] == "error" {
+		if validateRequestCountMetric(t, metric, pluginName) {
 			foundRequestCount = true
-			if metric.Value != 1 {
-				t.Errorf("Expected error request count 1, got %f", metric.Value)
-			}
 		}
 	}
 
@@ -1259,6 +1329,18 @@ func testCommonMetricsFailedRequest(t *testing.T, collector EnhancedMetricsColle
 	if !foundRequestCount {
 		t.Error("Error request count metric not found")
 	}
+}
+
+// testCommonMetricsFailedRequest tests failed request recording
+func testCommonMetricsFailedRequest(t *testing.T, collector EnhancedMetricsCollector, commonMetrics *CommonPluginMetrics, pluginName string) {
+	duration := 200 * time.Millisecond
+	err := goerrors.New(ErrCodePluginTimeout, "Request timeout")
+
+	// Record a failed request
+	commonMetrics.RecordRequest(pluginName, duration, err)
+
+	promMetrics := collector.GetPrometheusMetrics()
+	validateErrorMetrics(t, promMetrics, pluginName)
 }
 
 // testCommonMetricsCircuitBreakerState tests circuit breaker state tracking
@@ -1559,7 +1641,7 @@ func validateFailureMetrics(t *testing.T, observableManager *ObservableManager[T
 func TestObservableManager_ConcurrentAccess(t *testing.T) {
 	t.Parallel()
 
-	observableManager := setupConcurrentTestEnvironment(t)
+	observableManager := setupObservabilityConcurrentTestEnvironment(t)
 
 	const numRequests = 100
 	errorCount := executeConcurrentRequests(observableManager, numRequests)
@@ -1568,7 +1650,7 @@ func TestObservableManager_ConcurrentAccess(t *testing.T) {
 }
 
 // setupConcurrentTestEnvironment creates the environment for concurrent testing
-func setupConcurrentTestEnvironment(t *testing.T) *ObservableManager[TestRequest, TestResponse] {
+func setupObservabilityConcurrentTestEnvironment(t *testing.T) *ObservableManager[TestRequest, TestResponse] {
 	baseManager := NewManager[TestRequest, TestResponse](createTestLogger(t))
 	config := DefaultObservabilityConfig()
 	observableManager := NewObservableManager(baseManager, config)
@@ -1817,6 +1899,63 @@ func BenchmarkErrorCategorization(b *testing.B) {
 	})
 }
 
+// executeMemoryTestRequests executes multiple requests to build up metrics data
+func executeMemoryTestRequests(t *testing.T, observableManager *ObservableManager[TestRequest, TestResponse], numPlugins, numRequests int) {
+	ctx := context.Background()
+	request := TestRequest{
+		Action: "memory-test",
+		Data:   map[string]string{"load": "test"},
+	}
+
+	for i := 0; i < numRequests; i++ {
+		pluginName := fmt.Sprintf("memory-test-plugin-%d", i%numPlugins)
+		execCtx := ExecutionContext{
+			RequestID: fmt.Sprintf("memory-request-%d", i),
+			Timeout:   5 * time.Second,
+		}
+
+		// Intentionally ignore result and error for memory testing - we only care about metrics accumulation
+		// We capture the error but don't act on it in this stress test scenario
+		if _, err := observableManager.ExecuteWithObservability(ctx, pluginName, execCtx, request); err != nil {
+			// Error is expected in stress testing - plugin may fail under load
+			_ = err // Explicitly ignore for errcheck compliance
+		}
+
+		// Periodically check that metrics are being managed properly
+		validateMemoryTestProgress(t, observableManager, numPlugins, i)
+	}
+}
+
+// validateMemoryTestProgress validates memory test progress at periodic intervals
+func validateMemoryTestProgress(t *testing.T, observableManager *ObservableManager[TestRequest, TestResponse], numPlugins, iteration int) {
+	if iteration%1000 == 0 && iteration > 0 { // Skip the first check since not all plugins will have been used yet
+		report := observableManager.GetObservabilityMetrics()
+		// By this point we should have seen most plugins (at least half)
+		if len(report.Plugins) < numPlugins/2 {
+			t.Errorf("Expected at least %d plugins in report, got %d at iteration %d", numPlugins/2, len(report.Plugins), iteration)
+		}
+	}
+}
+
+// validateMemoryTestResults validates final results of memory test
+func validateMemoryTestResults(t *testing.T, observableManager *ObservableManager[TestRequest, TestResponse], numPlugins, numRequests int) {
+	finalReport := observableManager.GetObservabilityMetrics()
+
+	if len(finalReport.Plugins) != numPlugins {
+		t.Errorf("Expected %d plugins in final report, got %d", numPlugins, len(finalReport.Plugins))
+	}
+
+	// Verify total requests across all plugins
+	totalRequests := int64(0)
+	for _, pluginReport := range finalReport.Plugins {
+		totalRequests += pluginReport.TotalRequests
+	}
+
+	if totalRequests != int64(numRequests) {
+		t.Errorf("Expected %d total requests across all plugins, got %d", numRequests, totalRequests)
+	}
+}
+
 // TestObservabilitySystem_MemoryUsage tests memory usage under load
 func TestObservabilitySystem_MemoryUsage(t *testing.T) {
 	if testing.Short() {
@@ -1848,52 +1987,8 @@ func TestObservabilitySystem_MemoryUsage(t *testing.T) {
 	// Execute many requests to build up metrics data
 	const numRequests = 2000 // Reduced for faster testing
 
-	ctx := context.Background()
-	request := TestRequest{
-		Action: "memory-test",
-		Data:   map[string]string{"load": "test"},
-	}
-
-	for i := 0; i < numRequests; i++ {
-		pluginName := fmt.Sprintf("memory-test-plugin-%d", i%numPlugins)
-		execCtx := ExecutionContext{
-			RequestID: fmt.Sprintf("memory-request-%d", i),
-			Timeout:   5 * time.Second,
-		}
-
-		// Intentionally ignore result and error for memory testing - we only care about metrics accumulation
-		// We capture the error but don't act on it in this stress test scenario
-		if _, err := observableManager.ExecuteWithObservability(ctx, pluginName, execCtx, request); err != nil {
-			// Error is expected in stress testing - plugin may fail under load
-			_ = err // Explicitly ignore for errcheck compliance
-		}
-
-		// Periodically check that metrics are being managed properly
-		if i%1000 == 0 && i > 0 { // Skip the first check since not all plugins will have been used yet
-			report := observableManager.GetObservabilityMetrics()
-			// By this point we should have seen most plugins (at least half)
-			if len(report.Plugins) < numPlugins/2 {
-				t.Errorf("Expected at least %d plugins in report, got %d at iteration %d", numPlugins/2, len(report.Plugins), i)
-			}
-		}
-	}
-
-	// Final verification
-	finalReport := observableManager.GetObservabilityMetrics()
-
-	if len(finalReport.Plugins) != numPlugins {
-		t.Errorf("Expected %d plugins in final report, got %d", numPlugins, len(finalReport.Plugins))
-	}
-
-	// Verify total requests across all plugins
-	totalRequests := int64(0)
-	for _, pluginReport := range finalReport.Plugins {
-		totalRequests += pluginReport.TotalRequests
-	}
-
-	if totalRequests != numRequests {
-		t.Errorf("Expected %d total requests across all plugins, got %d", numRequests, totalRequests)
-	}
+	executeMemoryTestRequests(t, observableManager, numPlugins, numRequests)
+	validateMemoryTestResults(t, observableManager, numPlugins, numRequests)
 
 	t.Logf("Memory test completed: %d requests across %d plugins", numRequests, numPlugins)
 }

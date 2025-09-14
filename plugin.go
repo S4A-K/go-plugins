@@ -104,7 +104,30 @@ type PluginInfo struct {
 	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
-// ExecutionContext provides execution context and configuration to plugins
+// ExecutionContext provides execution context and configuration to plugins.
+//
+// This structure carries request-specific metadata and execution parameters
+// that plugins can use to customize their behavior, implement tracing,
+// handle timeouts, and manage retries. It ensures consistent context
+// propagation across different plugin types and transports.
+//
+// Fields:
+//   - RequestID: Unique identifier for request tracing and correlation
+//   - Timeout: Maximum execution time for this specific request
+//   - MaxRetries: Number of retry attempts allowed for this request
+//   - Headers: Transport-specific headers (HTTP headers, gRPC metadata, etc.)
+//   - Metadata: Additional context data (user info, feature flags, etc.)
+//
+// Example usage:
+//
+//	execCtx := ExecutionContext{
+//	    RequestID:  "req-12345",
+//	    Timeout:    30 * time.Second,
+//	    MaxRetries: 3,
+//	    Headers:    map[string]string{"Authorization": "Bearer token"},
+//	    Metadata:   map[string]string{"user_id": "user123"},
+//	}
+//	response, err := plugin.Execute(ctx, execCtx, request)
 type ExecutionContext struct {
 	RequestID  string            `json:"request_id"`
 	Timeout    time.Duration     `json:"timeout"`

@@ -322,6 +322,48 @@ func TestLoadBalancer_NewLoadBalancer(t *testing.T) {
 	}
 }
 
+// validateAddPluginError validates error expectations for plugin addition
+func validateAddPluginError(t *testing.T, err error, tc struct {
+	name             string
+	pluginName       string
+	weight           int
+	priority         int
+	expectError      bool
+	expectedErrorMsg string
+}) {
+	if tc.expectError {
+		if err == nil {
+			t.Error("Expected error but got none")
+		} else if tc.expectedErrorMsg != "" && !strings.Contains(err.Error(), tc.expectedErrorMsg) {
+			t.Errorf("Expected error containing '%s', got: %v", tc.expectedErrorMsg, err)
+		}
+	} else if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+}
+
+// validatePluginAddedCorrectly validates that plugin was added with correct parameters
+func validatePluginAddedCorrectly(t *testing.T, lb *LoadBalancer[TestLoadBalanceRequest, TestLoadBalanceResponse], pluginName string, weight, priority int) {
+	stats := lb.GetStats()
+	pluginStats, exists := stats[pluginName]
+	if !exists {
+		t.Errorf("Plugin %s was not added to stats", pluginName)
+		return
+	}
+
+	if pluginStats.Weight != weight {
+		t.Errorf("Expected weight %d, got %d", weight, pluginStats.Weight)
+	}
+
+	if pluginStats.Priority != priority {
+		t.Errorf("Expected priority %d, got %d", priority, pluginStats.Priority)
+	}
+
+	if !pluginStats.Enabled {
+		t.Error("Plugin should be enabled by default")
+	}
+}
+
 // TestLoadBalancer_AddPlugin tests plugin addition functionality
 func TestLoadBalancer_AddPlugin(t *testing.T) {
 	testCases := []struct {
@@ -365,37 +407,10 @@ func TestLoadBalancer_AddPlugin(t *testing.T) {
 			plugin.SetEnabled(true)
 
 			err := lb.AddPlugin(tc.pluginName, plugin, tc.weight, tc.priority)
+			validateAddPluginError(t, err, tc)
 
-			if tc.expectError {
-				if err == nil {
-					t.Error("Expected error but got none")
-				} else if tc.expectedErrorMsg != "" && !strings.Contains(err.Error(), tc.expectedErrorMsg) {
-					t.Errorf("Expected error containing '%s', got: %v", tc.expectedErrorMsg, err)
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("Unexpected error: %v", err)
-			}
-
-			// Verify plugin was added correctly
-			stats := lb.GetStats()
-			if _, exists := stats[tc.pluginName]; !exists {
-				t.Errorf("Plugin %s was not added to stats", tc.pluginName)
-			}
-
-			pluginStats := stats[tc.pluginName]
-			if pluginStats.Weight != tc.weight {
-				t.Errorf("Expected weight %d, got %d", tc.weight, pluginStats.Weight)
-			}
-
-			if pluginStats.Priority != tc.priority {
-				t.Errorf("Expected priority %d, got %d", tc.priority, pluginStats.Priority)
-			}
-
-			if !pluginStats.Enabled {
-				t.Error("Plugin should be enabled by default")
+			if !tc.expectError {
+				validatePluginAddedCorrectly(t, lb, tc.pluginName, tc.weight, tc.priority)
 			}
 		})
 	}
@@ -747,9 +762,8 @@ func TestLoadBalancer_WeightedRandomStrategy(t *testing.T) {
 	}
 }
 
-// TestLoadBalancer_ConsistentHashStrategy tests consistent hashing behavior
-func TestLoadBalancer_ConsistentHashStrategy(t *testing.T) {
-	// Create setup with error-free plugins for consistent hash testing
+// setupConsistentHashTest sets up load balancer and plugins for consistent hash testing
+func setupConsistentHashTest(t *testing.T) (*LoadBalancer[TestLoadBalanceRequest, TestLoadBalanceResponse], map[string]*MockLoadBalancePlugin) {
 	logger := createLoadBalancerTestLogger(t)
 	lb := NewLoadBalancer[TestLoadBalanceRequest, TestLoadBalanceResponse](StrategyConsistentHash, logger)
 
@@ -764,7 +778,11 @@ func TestLoadBalancer_ConsistentHashStrategy(t *testing.T) {
 		plugin.SetEnabled(true)
 	}
 
-	// Add plugins
+	return lb, plugins
+}
+
+// addConsistentHashPlugins adds plugins to the load balancer
+func addConsistentHashPlugins(t *testing.T, lb *LoadBalancer[TestLoadBalanceRequest, TestLoadBalanceResponse], plugins map[string]*MockLoadBalancePlugin) {
 	err := lb.AddPlugin("hash-plugin-1", plugins["hash-plugin-1"], 10, 100)
 	if err != nil {
 		t.Fatalf("Failed to add hash-plugin-1: %v", err)
@@ -779,13 +797,10 @@ func TestLoadBalancer_ConsistentHashStrategy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to add hash-plugin-3: %v", err)
 	}
+}
 
-	// Reset all plugin counters
-	for _, plugin := range plugins {
-		plugin.Reset()
-	}
-
-	// Test consistency using SelectPlugin method (without execution) to avoid race conditions
+// testHashConsistency tests that keys consistently map to the same plugin
+func testHashConsistency(t *testing.T, lb *LoadBalancer[TestLoadBalanceRequest, TestLoadBalanceResponse]) {
 	testKeys := []string{"user-1", "user-2", "user-3", "user-4", "user-5"}
 	keyToPlugin := make(map[string]string)
 
@@ -838,8 +853,21 @@ func TestLoadBalancer_ConsistentHashStrategy(t *testing.T) {
 	if len(usedPlugins) < 2 {
 		t.Logf("Warning: Only %d plugins were used, which might indicate poor hash distribution", len(usedPlugins))
 	} else {
-		t.Logf("Good hash distribution: %d plugins were used out of %d", len(usedPlugins), len(plugins))
+		t.Logf("Good hash distribution: %d plugins were used out of %d", len(usedPlugins), 3)
 	}
+}
+
+// TestLoadBalancer_ConsistentHashStrategy tests consistent hashing behavior
+func TestLoadBalancer_ConsistentHashStrategy(t *testing.T) {
+	lb, plugins := setupConsistentHashTest(t)
+	addConsistentHashPlugins(t, lb, plugins)
+
+	// Reset all plugin counters
+	for _, plugin := range plugins {
+		plugin.Reset()
+	}
+
+	testHashConsistency(t, lb)
 }
 
 // TestLoadBalancer_PriorityStrategy tests priority-based load balancing
@@ -882,19 +910,40 @@ func TestLoadBalancer_PriorityStrategy(t *testing.T) {
 }
 
 // TestLoadBalancer_LeastConnectionsStrategy tests least connections load balancing
-func TestLoadBalancer_LeastConnectionsStrategy(t *testing.T) {
-	// Create deterministic setup for CI-friendly testing
+// Helper function to setup least connections test environment
+func setupLeastConnectionsTest(t *testing.T) (*LoadBalancer[TestLoadBalanceRequest, TestLoadBalanceResponse], map[string]*MockLoadBalancePlugin, context.Context, ExecutionContext) {
 	logger := createLoadBalancerTestLogger(t)
 	lb := NewLoadBalancer[TestLoadBalanceRequest, TestLoadBalanceResponse](StrategyLeastConnections, logger)
 
 	// Create error-free plugins with same latency for deterministic behavior
-	plugins := map[string]*MockLoadBalancePlugin{
-		"plugin-1": NewMockLoadBalancePlugin("plugin-1", 1*time.Millisecond, 0.0), // Fast, no errors
-		"plugin-2": NewMockLoadBalancePlugin("plugin-2", 1*time.Millisecond, 0.0), // Fast, no errors
-		"plugin-3": NewMockLoadBalancePlugin("plugin-3", 1*time.Millisecond, 0.0), // Fast, no errors
+	plugins := createLeastConnectionsPlugins()
+
+	// Add plugins to load balancer
+	addPluginsToLoadBalancer(t, lb, plugins)
+
+	// Reset plugin counters
+	resetPluginCounters(plugins)
+
+	ctx := context.Background()
+	execCtx := ExecutionContext{
+		RequestID: "test-least-connections",
+		Timeout:   5 * time.Second,
 	}
 
-	// Enable all plugins and add them with equal weights
+	return lb, plugins, ctx, execCtx
+}
+
+// Helper function to create plugins for least connections test
+func createLeastConnectionsPlugins() map[string]*MockLoadBalancePlugin {
+	return map[string]*MockLoadBalancePlugin{
+		"plugin-1": NewMockLoadBalancePlugin("plugin-1", 1*time.Millisecond, 0.0),
+		"plugin-2": NewMockLoadBalancePlugin("plugin-2", 1*time.Millisecond, 0.0),
+		"plugin-3": NewMockLoadBalancePlugin("plugin-3", 1*time.Millisecond, 0.0),
+	}
+}
+
+// Helper function to add plugins to load balancer
+func addPluginsToLoadBalancer(t *testing.T, lb *LoadBalancer[TestLoadBalanceRequest, TestLoadBalanceResponse], plugins map[string]*MockLoadBalancePlugin) {
 	for name, plugin := range plugins {
 		plugin.SetEnabled(true)
 
@@ -903,19 +952,17 @@ func TestLoadBalancer_LeastConnectionsStrategy(t *testing.T) {
 			t.Fatalf("Failed to add %s: %v", name, err)
 		}
 	}
+}
 
-	// Reset plugin counters
+// Helper function to reset plugin counters
+func resetPluginCounters(plugins map[string]*MockLoadBalancePlugin) {
 	for _, plugin := range plugins {
 		plugin.Reset()
 	}
+}
 
-	ctx := context.Background()
-	execCtx := ExecutionContext{
-		RequestID: "test-least-connections",
-		Timeout:   5 * time.Second,
-	}
-
-	// Test 1: Verify plugin selection works
+// Helper function to test plugin selection
+func testLeastConnectionsPluginSelection(t *testing.T, lb *LoadBalancer[TestLoadBalanceRequest, TestLoadBalanceResponse]) {
 	lbReq := LoadBalanceRequest{
 		RequestID: "test-selection",
 		Key:       "test-key",
@@ -935,12 +982,33 @@ func TestLoadBalancer_LeastConnectionsStrategy(t *testing.T) {
 	}
 
 	t.Logf("Selected plugin: %s", pluginName)
+}
+
+func TestLoadBalancer_LeastConnectionsStrategy(t *testing.T) {
+	lb, plugins, ctx, execCtx := setupLeastConnectionsTest(t)
+
+	// Test 1: Verify plugin selection works
+	testLeastConnectionsPluginSelection(t, lb)
 
 	// Test 2: Execute requests and verify functionality
+	testLeastConnectionsRequestExecution(t, lb, ctx, execCtx)
+
+	// Test 3: Verify concurrent execution
+	testLeastConnectionsConcurrentExecution(t, lb, ctx, execCtx)
+
+	// Test 4: Verify final request counts
+	verifyLeastConnectionsRequestCounts(t, plugins, 21) // 15 from execution test + 6 from concurrent test
+
+	t.Logf("Least connections strategy test completed successfully")
+}
+
+// Helper function to test request execution for least connections strategy
+func testLeastConnectionsRequestExecution(t *testing.T, lb *LoadBalancer[TestLoadBalanceRequest, TestLoadBalanceResponse], ctx context.Context, execCtx ExecutionContext) {
 	numRequests := 15
 	successCount := 0
 	sourceDistribution := make(map[string]int)
 
+	// Execute requests and collect distribution data
 	for i := 0; i < numRequests; i++ {
 		lbReq := LoadBalanceRequest{
 			RequestID: fmt.Sprintf("req-%d", i),
@@ -965,38 +1033,29 @@ func TestLoadBalancer_LeastConnectionsStrategy(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	// Verify all requests succeeded
+	// Verify results
+	verifyRequestExecutionResults(t, numRequests, successCount, sourceDistribution)
+}
+
+// Helper function to verify request execution results
+func verifyRequestExecutionResults(t *testing.T, numRequests, successCount int, sourceDistribution map[string]int) {
 	if successCount != numRequests {
 		t.Errorf("Expected %d successful requests, got %d", numRequests, successCount)
 	}
 
 	t.Logf("Request distribution: %v", sourceDistribution)
 
-	// Verify all plugins processed at least some requests (since they have equal performance)
-	minExpectedRequests := 1 // At least 1 request per plugin is reasonable
+	// Verify all plugins processed at least some requests
+	minExpectedRequests := 1
 	for pluginName, count := range sourceDistribution {
 		if count < minExpectedRequests {
 			t.Logf("Plugin %s processed %d requests (acceptable for least connections)", pluginName, count)
 		}
 	}
+}
 
-	// Verify final request counts match
-	finalCounts := make(map[string]int64)
-	totalRequests := int64(0)
-	for name, plugin := range plugins {
-		count := plugin.GetRequestCount()
-		finalCounts[name] = count
-		totalRequests += count
-	}
-
-	t.Logf("Final plugin request counts: %v", finalCounts)
-
-	// Total should match our executed requests
-	if totalRequests != int64(numRequests) {
-		t.Errorf("Expected total requests %d, got %d", numRequests, totalRequests)
-	}
-
-	// Test 3: Verify concurrent execution
+// Helper function to test concurrent execution for least connections
+func testLeastConnectionsConcurrentExecution(t *testing.T, lb *LoadBalancer[TestLoadBalanceRequest, TestLoadBalanceResponse], ctx context.Context, execCtx ExecutionContext) {
 	concurrentRequests := 6
 	var wg sync.WaitGroup
 	concurrentSuccesses := int32(0)
@@ -1030,8 +1089,25 @@ func TestLoadBalancer_LeastConnectionsStrategy(t *testing.T) {
 	if int(concurrentSuccesses) != concurrentRequests {
 		t.Errorf("Expected %d concurrent successes, got %d", concurrentRequests, concurrentSuccesses)
 	}
+}
 
-	t.Logf("Least connections strategy test completed successfully")
+// Helper function to verify request counts for least connections
+func verifyLeastConnectionsRequestCounts(t *testing.T, plugins map[string]*MockLoadBalancePlugin, expectedTotal int) {
+	finalCounts := make(map[string]int64)
+	totalRequests := int64(0)
+
+	for name, plugin := range plugins {
+		count := plugin.GetRequestCount()
+		finalCounts[name] = count
+		totalRequests += count
+	}
+
+	t.Logf("Final plugin request counts: %v", finalCounts)
+
+	// Total should match our executed requests
+	if totalRequests != int64(expectedTotal) {
+		t.Errorf("Expected total requests %d, got %d", expectedTotal, totalRequests)
+	}
 }
 
 // TestLoadBalancer_LeastLatencyStrategy tests least latency load balancing
@@ -1216,6 +1292,56 @@ func TestLoadBalancer_ExecuteWithTimeout(t *testing.T) {
 	}
 }
 
+// validateBasicPluginFields validates basic plugin statistics fields
+func validateBasicPluginFields(t *testing.T, name string, stat LoadBalancerStats) {
+	if stat.PluginName != name {
+		t.Errorf("Expected plugin name %s, got %s", name, stat.PluginName)
+	}
+
+	if stat.Weight <= 0 {
+		t.Errorf("Weight should be positive for plugin %s, got %d", name, stat.Weight)
+	}
+
+	if stat.Priority <= 0 {
+		t.Errorf("Priority should be positive for plugin %s, got %d", name, stat.Priority)
+	}
+
+	if !stat.Enabled {
+		t.Errorf("Plugin %s should be enabled", name)
+	}
+}
+
+// validateTimingAndHealthFields validates timing and health score fields
+func validateTimingAndHealthFields(t *testing.T, name string, stat LoadBalancerStats) {
+	if stat.LastUsed.IsZero() {
+		t.Errorf("LastUsed should be set for plugin %s", name)
+	}
+
+	if stat.HealthScore < 0 || stat.HealthScore > 100 {
+		t.Errorf("Health score should be 0-100 for plugin %s, got %d", name, stat.HealthScore)
+	}
+}
+
+// validateSuccessRateCalculation validates success rate calculation
+func validateSuccessRateCalculation(t *testing.T, name string, stat LoadBalancerStats) {
+	successRate := stat.GetSuccessRate()
+	if stat.TotalRequests > 0 {
+		expectedRate := float64(stat.SuccessfulRequests) / float64(stat.TotalRequests) * 100.0
+		if math.Abs(successRate-expectedRate) > 0.001 {
+			t.Errorf("Success rate calculation error for plugin %s: expected %.3f, got %.3f",
+				name, expectedRate, successRate)
+		}
+	} else {
+		if successRate != 0.0 {
+			t.Errorf("Success rate should be 0.0 when no requests processed for plugin %s, got %.3f",
+				name, successRate)
+		}
+	}
+
+	t.Logf("Plugin %s stats: Requests=%d, Success=%.1f%%, AvgLatency=%v, Health=%d",
+		name, stat.TotalRequests, successRate, stat.AverageLatency, stat.HealthScore)
+}
+
 // TestLoadBalancer_GetStats tests statistics collection and reporting
 func TestLoadBalancer_GetStats(t *testing.T) {
 	lb, plugins := createLoadBalancerTestSetup(t, StrategyRoundRobin)
@@ -1236,50 +1362,58 @@ func TestLoadBalancer_GetStats(t *testing.T) {
 			continue
 		}
 
-		// Verify basic fields
-		if stat.PluginName != name {
-			t.Errorf("Expected plugin name %s, got %s", name, stat.PluginName)
+		validateBasicPluginFields(t, name, stat)
+		validateTimingAndHealthFields(t, name, stat)
+		validateSuccessRateCalculation(t, name, stat)
+	}
+}
+
+// runConcurrentWorker executes requests for a single worker in concurrent testing
+func runConcurrentWorker(t *testing.T, lb *LoadBalancer[TestLoadBalanceRequest, TestLoadBalanceResponse],
+	workerID, requestsPerGoroutine int, ctx context.Context, execCtx ExecutionContext) {
+	for j := 0; j < requestsPerGoroutine; j++ {
+		lbReq := LoadBalanceRequest{
+			RequestID: fmt.Sprintf("worker-%d-req-%d", workerID, j),
+			Key:       fmt.Sprintf("key-%d-%d", workerID, j),
 		}
 
-		if stat.Weight <= 0 {
-			t.Errorf("Weight should be positive for plugin %s, got %d", name, stat.Weight)
+		req := TestLoadBalanceRequest{
+			ID:      lbReq.RequestID,
+			Payload: fmt.Sprintf("payload-%d-%d", workerID, j),
 		}
 
-		if stat.Priority <= 0 {
-			t.Errorf("Priority should be positive for plugin %s, got %d", name, stat.Priority)
+		_, err := lb.Execute(ctx, execCtx, lbReq, req)
+		if err != nil && !strings.Contains(err.Error(), "simulated error") {
+			t.Errorf("Unexpected error in worker %d: %v", workerID, err)
 		}
+	}
+}
 
-		if !stat.Enabled {
-			t.Errorf("Plugin %s should be enabled", name)
-		}
+// validateConcurrentTestStats validates statistics after concurrent execution
+func validateConcurrentTestStats(t *testing.T, stats map[string]LoadBalancerStats) int64 {
+	totalRequests := int64(0)
 
-		// Verify timing fields
-		if stat.LastUsed.IsZero() {
-			t.Errorf("LastUsed should be set for plugin %s", name)
-		}
+	for name, stat := range stats {
+		totalRequests += stat.TotalRequests
+		t.Logf("Plugin %s handled %d requests after concurrent test", name, stat.TotalRequests)
 
-		// Verify health score is in valid range
-		if stat.HealthScore < 0 || stat.HealthScore > 100 {
-			t.Errorf("Health score should be 0-100 for plugin %s, got %d", name, stat.HealthScore)
-		}
+		validatePluginStatsConsistency(t, name, stat)
+	}
 
-		// Test success rate calculation
-		successRate := stat.GetSuccessRate()
-		if stat.TotalRequests > 0 {
-			expectedRate := float64(stat.SuccessfulRequests) / float64(stat.TotalRequests) * 100.0
-			if math.Abs(successRate-expectedRate) > 0.001 {
-				t.Errorf("Success rate calculation error for plugin %s: expected %.3f, got %.3f",
-					name, expectedRate, successRate)
-			}
-		} else {
-			if successRate != 0.0 {
-				t.Errorf("Success rate should be 0.0 when no requests processed for plugin %s, got %.3f",
-					name, successRate)
-			}
-		}
+	return totalRequests
+}
 
-		t.Logf("Plugin %s stats: Requests=%d, Success=%.1f%%, AvgLatency=%v, Health=%d",
-			name, stat.TotalRequests, successRate, stat.AverageLatency, stat.HealthScore)
+// validatePluginStatsConsistency validates individual plugin statistics consistency
+func validatePluginStatsConsistency(t *testing.T, name string, stat LoadBalancerStats) {
+	// Verify stats are non-negative
+	if stat.TotalRequests < 0 || stat.SuccessfulRequests < 0 || stat.FailedRequests < 0 {
+		t.Errorf("Plugin %s has negative request counts", name)
+	}
+
+	// Verify successful + failed = total (allowing for rounding)
+	if stat.SuccessfulRequests+stat.FailedRequests != stat.TotalRequests {
+		t.Errorf("Plugin %s: successful (%d) + failed (%d) != total (%d)",
+			name, stat.SuccessfulRequests, stat.FailedRequests, stat.TotalRequests)
 	}
 }
 
@@ -1313,23 +1447,7 @@ func TestLoadBalancer_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-
-			for j := 0; j < requestsPerGoroutine; j++ {
-				lbReq := LoadBalanceRequest{
-					RequestID: fmt.Sprintf("worker-%d-req-%d", workerID, j),
-					Key:       fmt.Sprintf("key-%d-%d", workerID, j),
-				}
-
-				req := TestLoadBalanceRequest{
-					ID:      lbReq.RequestID,
-					Payload: fmt.Sprintf("payload-%d-%d", workerID, j),
-				}
-
-				_, err := lb.Execute(ctx, execCtx, lbReq, req)
-				if err != nil && !strings.Contains(err.Error(), "simulated error") {
-					t.Errorf("Unexpected error in worker %d: %v", workerID, err)
-				}
-			}
+			runConcurrentWorker(t, lb, workerID, requestsPerGoroutine, ctx, execCtx)
 		}(i)
 	}
 
@@ -1337,23 +1455,7 @@ func TestLoadBalancer_ConcurrentAccess(t *testing.T) {
 
 	// Verify no data races occurred and stats are consistent
 	stats := lb.GetStats()
-	totalRequests := int64(0)
-
-	for name, stat := range stats {
-		totalRequests += stat.TotalRequests
-		t.Logf("Plugin %s handled %d requests after concurrent test", name, stat.TotalRequests)
-
-		// Verify stats are non-negative
-		if stat.TotalRequests < 0 || stat.SuccessfulRequests < 0 || stat.FailedRequests < 0 {
-			t.Errorf("Plugin %s has negative request counts", name)
-		}
-
-		// Verify successful + failed = total (allowing for rounding)
-		if stat.SuccessfulRequests+stat.FailedRequests != stat.TotalRequests {
-			t.Errorf("Plugin %s: successful (%d) + failed (%d) != total (%d)",
-				name, stat.SuccessfulRequests, stat.FailedRequests, stat.TotalRequests)
-		}
-	}
+	totalRequests := validateConcurrentTestStats(t, stats)
 
 	expectedTotal := int64(numGoroutines * requestsPerGoroutine)
 	if totalRequests != expectedTotal {
@@ -1411,7 +1513,11 @@ func TestLoadBalancer_HealthScoreUpdates(t *testing.T) {
 			Payload: fmt.Sprintf("health-payload-%d", i),
 		}
 
-		_, _ = lb.Execute(ctx, execCtx, lbReq, req) // Ignore errors for this test
+		_, err := lb.Execute(ctx, execCtx, lbReq, req)
+		if err != nil {
+			// Log but continue - this is a health check test
+			t.Logf("Health check execute failed (expected in some cases): %v", err)
+		}
 	}
 
 	// Check health scores
@@ -1474,8 +1580,8 @@ func TestLoadBalancer_UnsupportedStrategy(t *testing.T) {
 	}
 }
 
-// TestSecureRandomInt tests the secure random number generation
-func TestSecureRandomInt(t *testing.T) {
+// testSecureRandomBasicCases tests basic validation cases for secureRandomInt
+func testSecureRandomBasicCases(t *testing.T) {
 	testCases := []struct {
 		name        string
 		max         int
@@ -1508,36 +1614,44 @@ func TestSecureRandomInt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// testSecureRandomDistribution tests the distribution of random values
+func testSecureRandomDistribution(t *testing.T) {
+	const maxVal = 5
+	const iterations = 1000
+	counts := make(map[int]int)
+
+	for i := 0; i < iterations; i++ {
+		result, err := secureRandomInt(maxVal)
+		if err != nil {
+			t.Fatalf("Unexpected error in iteration %d: %v", i, err)
+		}
+		counts[result]++
+	}
+
+	// Each value should appear at least once in 1000 iterations
+	for i := 0; i < maxVal; i++ {
+		if counts[i] == 0 {
+			t.Errorf("Value %d never appeared in %d iterations", i, iterations)
+		}
+	}
+
+	// Distribution should be roughly uniform (allow significant variance for small sample)
+	expectedCount := iterations / maxVal
+	for i := 0; i < maxVal; i++ {
+		if counts[i] < expectedCount/3 || counts[i] > expectedCount*3 {
+			t.Logf("Value %d appeared %d times (expected ~%d)", i, counts[i], expectedCount)
+		}
+	}
+}
+
+// TestSecureRandomInt tests the secure random number generation
+func TestSecureRandomInt(t *testing.T) {
+	testSecureRandomBasicCases(t)
 
 	// Test distribution for small range
-	t.Run("DistributionTest", func(t *testing.T) {
-		const maxVal = 5
-		const iterations = 1000
-		counts := make(map[int]int)
-
-		for i := 0; i < iterations; i++ {
-			result, err := secureRandomInt(maxVal)
-			if err != nil {
-				t.Fatalf("Unexpected error in iteration %d: %v", i, err)
-			}
-			counts[result]++
-		}
-
-		// Each value should appear at least once in 1000 iterations
-		for i := 0; i < maxVal; i++ {
-			if counts[i] == 0 {
-				t.Errorf("Value %d never appeared in %d iterations", i, iterations)
-			}
-		}
-
-		// Distribution should be roughly uniform (allow significant variance for small sample)
-		expectedCount := iterations / maxVal
-		for i := 0; i < maxVal; i++ {
-			if counts[i] < expectedCount/3 || counts[i] > expectedCount*3 {
-				t.Logf("Value %d appeared %d times (expected ~%d)", i, counts[i], expectedCount)
-			}
-		}
-	})
+	t.Run("DistributionTest", testSecureRandomDistribution)
 }
 
 // Benchmark tests for performance validation
