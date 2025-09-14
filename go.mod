@@ -9,8 +9,6 @@ require (
 	google.golang.org/grpc v1.68.0-dev
 )
 
-replace github.com/agilira/argus => ../argus
-
 require (
 	github.com/agilira/flash-flags v1.0.1 // indirect
 	golang.org/x/net v0.44.0 // indirect
