@@ -47,9 +47,10 @@ func setupCrossPlatformPathValidationTest(t *testing.T, assert *TestAssertions) 
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	unixTestFile := "/tmp/test-config-path-validation.json"
-	err = os.WriteFile(unixTestFile, []byte(`{"plugins":[]}`), 0644)
-	assert.AssertNoError(err, "create unix test file")
+	// Use cross-platform temp file instead of hardcoded /tmp path
+	crossPlatformTestFile := filepath.Join(tempDir, "test-config-path-validation.json")
+	err = os.WriteFile(crossPlatformTestFile, []byte(`{"plugins":[]}`), 0644)
+	assert.AssertNoError(err, "create cross-platform test file")
 
 	relativeTestFile := "config-path-validation.json"
 	err = os.WriteFile(relativeTestFile, []byte(`{"plugins":[]}`), 0644)
@@ -59,9 +60,7 @@ func setupCrossPlatformPathValidationTest(t *testing.T, assert *TestAssertions) 
 		if removeErr := os.RemoveAll(tempDir); removeErr != nil {
 			t.Errorf("Failed to cleanup temp dir: %v", removeErr)
 		}
-		if removeErr := os.Remove(unixTestFile); removeErr != nil {
-			t.Errorf("Failed to cleanup unix test file: %v", removeErr)
-		}
+		// crossPlatformTestFile is already inside tempDir, so RemoveAll will handle it
 		if removeErr := os.Remove(relativeTestFile); removeErr != nil {
 			t.Errorf("Failed to cleanup relative test file: %v", removeErr)
 		}
@@ -82,12 +81,7 @@ type CrossPlatformPathValidationTestCase struct {
 // getCrossPlatformPathValidationTestCases returns the basic test cases for cross-platform path validation
 func getCrossPlatformPathValidationTestCases() []CrossPlatformPathValidationTestCase {
 	return []CrossPlatformPathValidationTestCase{
-		{
-			name:        "ValidAbsolutePath_Unix",
-			path:        "/tmp/test-config-path-validation.json",
-			expectError: false,
-			osSpecific:  "unix",
-		},
+		// Note: ValidAbsolutePath test will be generated dynamically in the test function
 		{
 			name:        "ValidRelativePath",
 			path:        "config-path-validation.json",
@@ -218,7 +212,27 @@ func TestConfigLoader_CrossPlatform_PathValidation(t *testing.T) {
 	watcher, cleanup := setupCrossPlatformPathValidationTest(t, assert)
 	defer cleanup()
 
+	// Create a cross-platform temp file path for testing
+	tempDir, err := os.MkdirTemp("", "go-plugins-path-test-validation")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir for validation test: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	crossPlatformTestFile := filepath.Join(tempDir, "test-config-cross-platform.json")
+	err = os.WriteFile(crossPlatformTestFile, []byte(`{"plugins":[]}`), 0644)
+	assert.AssertNoError(err, "create cross-platform test file for validation")
+
 	testCases := getCrossPlatformPathValidationTestCases()
+
+	// Add the dynamic cross-platform test case
+	testCases = append(testCases, CrossPlatformPathValidationTestCase{
+		name:        "ValidAbsolutePath_CrossPlatform",
+		path:        crossPlatformTestFile,
+		expectError: false,
+		osSpecific:  "all",
+	})
+
 	testCases = addWindowsSpecificTestCases(testCases)
 	runPathValidationTests(t, assert, watcher, testCases)
 }
@@ -940,10 +954,13 @@ func benchmarkConfigLoadFromFile(t *testing.T, watcher *ConfigWatcher[TestReques
 
 // benchmarkSecurePathValidation benchmarks secure path validation
 func benchmarkSecurePathValidation(t *testing.T, watcher *ConfigWatcher[TestRequest, TestResponse], configPath string) {
+	// Create a cross-platform temp path for benchmarking
+	tempPath := filepath.Join(os.TempDir(), "benchmark-test.json")
+
 	testPaths := []string{
 		configPath,
 		"config.json",
-		"/tmp/test.json",
+		tempPath, // Use cross-platform temp path instead of /tmp/test.json
 		"./relative/path.json",
 	}
 

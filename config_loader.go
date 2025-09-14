@@ -543,11 +543,24 @@ func (cw *ConfigWatcher[Req, Resp]) validateWindowsPath(path string) error {
 		}
 	}
 
-	// Check for invalid Windows characters
-	invalidChars := []string{"<", ">", ":", "\"", "|", "?", "*"}
+	// Check for invalid Windows characters, but handle drive letters properly
+	invalidChars := []string{"<", ">", "\"", "|", "?", "*"}
 	for _, char := range invalidChars {
 		if strings.Contains(path, char) {
 			return fmt.Errorf("invalid Windows path character: %s", char)
+		}
+	}
+
+	// Special handling for colons: only valid as drive letter separator (e.g., C:)
+	colonIndex := strings.Index(path, ":")
+	if colonIndex != -1 {
+		// Colon is only valid if it's at position 1 (drive letter like "C:")
+		// and there are no other colons in the path
+		if colonIndex != 1 || strings.Count(path, ":") > 1 {
+			// Check if this looks like a Windows drive letter
+			if colonIndex != 1 || len(path) < 2 || !((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) {
+				return fmt.Errorf("invalid Windows path character: colon")
+			}
 		}
 	}
 
