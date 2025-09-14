@@ -6,7 +6,7 @@ require (
 	github.com/agilira/argus v1.0.1
 	github.com/agilira/go-errors v1.1.0
 	github.com/agilira/go-timecache v1.0.1
-	google.golang.org/grpc v1.68.0-dev
+	google.golang.org/grpc v1.76.0-dev
 )
 
 require (
