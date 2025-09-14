@@ -131,11 +131,7 @@ func addWindowsSpecificTestCases(testCases []CrossPlatformPathValidationTestCase
 		expectError   bool
 		errorContains string
 	}{
-		{
-			name:        "ValidWindowsAbsolutePath",
-			path:        "C:\\temp\\config.json",
-			expectError: false,
-		},
+		// Note: ValidWindowsAbsolutePath test will be added dynamically with a real temp file
 		{
 			name:        "ValidWindowsUNCPath",
 			path:        "\\\\server\\share\\config.json",
@@ -232,6 +228,20 @@ func TestConfigLoader_CrossPlatform_PathValidation(t *testing.T) {
 		expectError: false,
 		osSpecific:  "all",
 	})
+
+	// Add Windows-specific test case with a real temp file if running on Windows
+	if runtime.GOOS == "windows" {
+		windowsTempFile := filepath.Join(tempDir, "windows-test-config.json")
+		err := os.WriteFile(windowsTempFile, []byte(`{"plugins":[]}`), 0644)
+		if err == nil {
+			testCases = append(testCases, CrossPlatformPathValidationTestCase{
+				name:        "ValidWindowsAbsolutePath",
+				path:        windowsTempFile,
+				expectError: false,
+				osSpecific:  "windows",
+			})
+		}
+	}
 
 	testCases = addWindowsSpecificTestCases(testCases)
 	runPathValidationTests(t, assert, watcher, testCases)
