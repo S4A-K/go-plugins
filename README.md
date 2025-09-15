@@ -8,7 +8,7 @@
 
 go-plugins provides a production-ready, type-safe plugin architecture for Go applications. It supports multiple transport protocols (HTTP, gRPC, Unix sockets) with built-in circuit breaking, health monitoring, authentication, graceful degradation & hot reload powered by [Argus](https://github.com/agilira/argus) (12.10ns/op).
 
-**[Features](#features) • [Quick Start](#quick-start) • [Usage](#usage) •  [Observability](#observability) • [Examples](#examples) • [Documentation](#documentation) • [API Reference](#api-reference)**
+**[Features](#features) • [Quick Start](#quick-start) • [Usage](#usage) • [Usage Examples](#usage-examples) • [Observability](#observability) • [Examples](#examples) • [Documentation](#documentation) • [API Reference](#api-reference)**
 
 ## Features
 
@@ -25,7 +25,7 @@ go-plugins provides a production-ready, type-safe plugin architecture for Go app
 
 ## Compatibility and Support
 
-go-plugins is designed for Go 1.25+ environments and follows Long-Term Support guidelines to ensure consistent performance across production deployments.
+go-plugins supports Go 1.23+ but **Go 1.25+ is recommended** for production environments due to enhanced security in dependency chains. The library follows Long-Term Support guidelines to ensure consistent performance across production deployments.
 
 ## Quick Start
 
@@ -194,6 +194,55 @@ if overallHealth.Status != goplugins.StatusHealthy {
 }
 ```
 
+#### Advanced Metrics Integration
+
+**Production-Ready Observability with Pluggable Exporters:**
+
+```go
+// Create metrics registry with multiple exporters
+registry := goplugins.NewMetricsRegistry(goplugins.RegistryConfig{
+    ExportInterval: 15 * time.Second,
+    BatchSize:      1000,
+})
+
+// Register multiple observability backends
+registry.RegisterExporter(goplugins.NewPrometheusExporter())
+registry.RegisterExporter(goplugins.NewOpenTelemetryExporter())
+
+// Type-safe metrics with automatic export
+counter := registry.Counter("api_requests_total", 
+    "Total API requests", "method", "status")
+gauge := registry.Gauge("active_connections", 
+    "Active connections", "plugin")
+histogram := registry.Histogram("response_time_seconds", 
+    "Response times", []float64{0.1, 0.5, 1.0, 2.0, 5.0}, "endpoint")
+
+// Metrics are automatically exported to all registered backends
+counter.Inc("GET", "200")
+gauge.Set(42, "auth-service")
+histogram.Observe(0.250, "/api/users")
+```
+
+**Custom Exporter Implementation:**
+
+```go
+type CustomExporter struct{}
+
+func (e *CustomExporter) Export(ctx context.Context, metrics []goplugins.ExportableMetric) error {
+    for _, metric := range metrics {
+        // Send to your custom backend (CloudWatch, DataDog, etc.)
+        if err := sendToCustomBackend(metric); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+
+func (e *CustomExporter) Name() string { return "custom-backend" }
+func (e *CustomExporter) Supports(t goplugins.MetricType) bool { return true }
+func (e *CustomExporter) Close(ctx context.Context) error { return nil }
+```
+
 ### Core Components
 
 - **Manager**: Central plugin management with lifecycle control and load balancing
@@ -217,7 +266,7 @@ go tool cover -html=coverage.out
 go test -bench=. -benchmem ./...
 ```
 
-## Examples
+## Usage Examples
 
 ### Load Balancing
 ```go
@@ -318,22 +367,29 @@ config := goplugins.ManagerConfig{
 }
 ```
 
-## Documentation
+## Examples
 
-### Plugin Configuration Guides
-- **[Plugin Requirements Guide](./docs/PLUGIN_REQUIREMENTS.md)**: Complete guide to plugin configuration requirements and best practices
-- **[Quick Reference](./docs/QUICK_REFERENCE.md)**: Fast lookup for common plugin configurations and troubleshooting
+Four complete examples demonstrating different transport types:
 
-### Key Topics Covered
-- **Required vs Optional Fields**: What every plugin configuration must have
-- **Transport-Specific Requirements**: HTTP, gRPC, Unix sockets, and executable plugins  
-- **Authentication Setup**: API keys, Bearer tokens, Basic auth, mTLS configuration
-- **Hot Reload Configuration**: Argus integration requirements and best practices
-- **Common Pitfalls**: Error codes, validation failures, and their solutions
-- **Performance Optimization**: Connection pooling, rate limiting, circuit breakers
-- **Testing Best Practices**: Deterministic testing patterns and configurations
+### [HTTP Plugin](examples/http-plugin/)
+Text processing service with REST API. Supports uppercase, lowercase, reverse, word count operations.
 
-> **Tip**: Start with the [Quick Reference](./docs/QUICK_REFERENCE.md) for immediate help, then dive into the [comprehensive guide](./docs/PLUGIN_REQUIREMENTS.md) for detailed explanations.
+### [gRPC Plugin](examples/grpc-plugin/) 
+Calculator service using Protocol Buffers. Demonstrates add, multiply, divide operations with type safety.
+
+### [Hot Reload Plugin](examples/hot-reload-plugin/)
+Dynamic configuration management with Argus file watching. Runtime plugin updates without service restart.
+
+For complete hot reload documentation and advanced configuration options, see the [Argus repository](https://github.com/agilira/argus).
+
+### [Unix Socket Plugin](examples/unix-socket-plugin/)
+File manager using Unix domain sockets. High-performance local communication for file operations.
+
+**Quick Start:**
+```bash
+cd examples/<example-name>/
+go run .
+```
 
 ## API Reference
 

@@ -129,6 +129,149 @@ type PrometheusBucket struct {
 	Count      uint64  `json:"count"`
 }
 
+// MetricsExporter defines the interface for exporting metrics to external systems.
+//
+// This interface enables flexible integration with various observability backends
+// without coupling the core metrics collection to specific implementations.
+// Exporters can be chained, filtered, or replaced without affecting metric collection.
+//
+// Key design principles:
+//   - Zero dependencies: Interface has no external dependencies
+//   - Async-friendly: Export operations can be batched and async
+//   - Error resilient: Export failures don't affect metric collection
+//   - Pluggable: Multiple exporters can be registered simultaneously
+//
+// Example implementations:
+//   - PrometheusExporter: HTTP endpoint for Prometheus scraping
+//   - OpenTelemetryExporter: OTLP protocol for OpenTelemetry collectors
+//   - StatsDExporter: UDP/TCP exporter for StatsD/DogStatsD
+//   - LogExporter: Structured logging of metrics
+//   - CloudExporter: AWS CloudWatch, GCP Cloud Monitoring, Azure Monitor
+//
+// Example usage:
+//
+//	registry := NewMetricsRegistry()
+//	registry.RegisterExporter(NewPrometheusExporter())
+//	registry.RegisterExporter(NewOpenTelemetryExporter())
+//
+//	// Metrics are automatically exported to all registered exporters
+//	registry.Counter("requests_total").Inc("handler", "api")
+type MetricsExporter interface {
+	// Export metrics in the exporter's native format
+	Export(ctx context.Context, metrics []ExportableMetric) error
+
+	// Name returns the exporter identifier for logging and debugging
+	Name() string
+
+	// Supports returns true if the exporter can handle the given metric type
+	Supports(metricType MetricType) bool
+
+	// Close gracefully shuts down the exporter, flushing any pending metrics
+	Close(ctx context.Context) error
+}
+
+// MetricsRegistry defines the interface for managing metric lifecycle and export.
+//
+// The registry acts as the central coordinator between metric collection and export,
+// providing lifecycle management, batching, filtering, and error handling.
+// It enables complex observability setups while maintaining simple interfaces.
+//
+// Key capabilities:
+//   - Metric registration and deregistration
+//   - Automatic export scheduling and batching
+//   - Exporter health monitoring and failover
+//   - Metric filtering and transformation
+//   - Performance optimizations (sampling, aggregation)
+//
+// Example usage:
+//
+//	registry := NewMetricsRegistry(RegistryConfig{
+//	    ExportInterval: 15 * time.Second,
+//	    BatchSize:      1000,
+//	    ErrorPolicy:    ErrorPolicyRetry,
+//	})
+//
+//	counter := registry.Counter("api_requests", "Tracks API requests", "method", "status")
+//	gauge := registry.Gauge("queue_depth", "Current queue depth", "queue")
+//	histogram := registry.Histogram("response_time", "Response times", DefaultBuckets, "endpoint")
+type MetricsRegistry interface {
+	// Metric creation with type safety and metadata
+	Counter(name, description string, labelNames ...string) CounterMetric
+	Gauge(name, description string, labelNames ...string) GaugeMetric
+	Histogram(name, description string, buckets []float64, labelNames ...string) HistogramMetric
+
+	// Exporter management
+	RegisterExporter(exporter MetricsExporter) error
+	UnregisterExporter(name string) error
+	ListExporters() []string
+
+	// Registry lifecycle
+	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
+
+	// Metrics introspection
+	ListMetrics() []MetricInfo
+	GetMetric(name string) (ExportableMetric, bool)
+}
+
+// ExportableMetric represents a metric in a standardized format for export.
+//
+// This format is designed to be easily convertible to various observability
+// formats (Prometheus, OpenTelemetry, StatsD, etc.) while preserving
+// all necessary metadata and type information.
+type ExportableMetric struct {
+	Name        string            `json:"name"`
+	Type        MetricType        `json:"type"`
+	Description string            `json:"description"`
+	Value       interface{}       `json:"value"` // Type depends on MetricType
+	Labels      map[string]string `json:"labels"`
+	Timestamp   time.Time         `json:"timestamp"`
+
+	// Type-specific data
+	Buckets   []MetricBucket `json:"buckets,omitempty"`   // For histograms
+	Quantiles []Quantile     `json:"quantiles,omitempty"` // For summaries
+	Exemplars []Exemplar     `json:"exemplars,omitempty"` // For trace correlation
+}
+
+// MetricType represents the type of metric
+type MetricType string
+
+const (
+	MetricTypeCounter   MetricType = "counter"
+	MetricTypeGauge     MetricType = "gauge"
+	MetricTypeHistogram MetricType = "histogram"
+	MetricTypeSummary   MetricType = "summary"
+)
+
+// MetricBucket represents a histogram bucket
+type MetricBucket struct {
+	UpperBound float64 `json:"upper_bound"`
+	Count      uint64  `json:"count"`
+}
+
+// Quantile represents a summary quantile
+type Quantile struct {
+	Quantile float64 `json:"quantile"`
+	Value    float64 `json:"value"`
+}
+
+// Exemplar represents a trace exemplar for metric correlation
+type Exemplar struct {
+	Labels    map[string]string `json:"labels"`
+	Value     float64           `json:"value"`
+	Timestamp time.Time         `json:"timestamp"`
+	TraceID   string            `json:"trace_id,omitempty"`
+}
+
+// MetricInfo provides metadata about registered metrics
+type MetricInfo struct {
+	Name        string     `json:"name"`
+	Type        MetricType `json:"type"`
+	Description string     `json:"description"`
+	LabelNames  []string   `json:"label_names"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
 // TracingProvider defines interface for distributed tracing
 type TracingProvider interface {
 	// Start a new span

@@ -3,6 +3,8 @@ name: PR Quick Check
 on:
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      - 'examples/**'
 
 env:
   CGO_ENABLED: 1
@@ -24,16 +26,16 @@ jobs:
     - name: Quick Quality Check
       run: |
         # Format check
-        test -z "$(gofmt -l .)"
+        test -z "$(gofmt -l . | grep -v '^examples/')"
         
         # Vet
-        go vet ./...
+        go vet $(go list ./... | grep -v '/examples/')
         
         # Basic test
-        go test -short ./...
+        go test -short $(go list ./... | grep -v '/examples/')
 
     - name: Install Security Tools
       run: go install github.com/securego/gosec/v2/cmd/gosec@latest
 
     - name: Security Scan
-      run: gosec --exclude=G104,G306,G301 ./...
+      run: gosec --exclude=G104,G306,G301 $(go list ./... | grep -v '/examples/')

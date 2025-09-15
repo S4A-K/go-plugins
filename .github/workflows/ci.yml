@@ -3,8 +3,12 @@ name: CI/CD
 on:
   push:
     branches: [ main, develop ]
+    paths-ignore:
+      - 'examples/**'
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      - 'examples/**'
 
 env:
   CGO_ENABLED: 1
@@ -38,27 +42,27 @@ jobs:
         fi
 
     - name: Go Vet
-      run: go vet ./...
+      run: go vet $(go list ./... | grep -v '/examples/')
 
     - name: Staticcheck
-      run: staticcheck ./...
+      run: staticcheck $(go list ./... | grep -v '/examples/')
 
     - name: Revive (Golint replacement)
-      run: revive ./... || true
+      run: revive $(go list ./... | grep -v '/examples/') || true
 
     - name: Security Scan (gosec)
       continue-on-error: true
       run: |
         echo "Running security scan..."
-        gosec ./... || true
+        gosec $(go list ./... | grep -v '/examples/') || true
         echo "✅ Security scan completed"
 
     - name: Test with Race Detection
-      run: go test -race -timeout 5m -v ./...
+      run: go test -race -timeout 5m -v $(go list ./... | grep -v '/examples/')
 
     - name: Test Coverage
       run: |
-        go test -coverprofile=coverage.out ./...
+        go test -coverprofile=coverage.out $(go list ./... | grep -v '/examples/')
         go tool cover -func=coverage.out
 
     - name: Upload coverage to Codecov
@@ -90,7 +94,7 @@ jobs:
         cache: true
 
     - name: Build
-      run: go build -v ./...
+      run: go build -v $(go list ./... | grep -v '/examples/')
 
     - name: Short Test (no race, faster)
-      run: go test -short -timeout 30s ./...
+      run: go test -short -timeout 30s $(go list ./... | grep -v '/examples/')

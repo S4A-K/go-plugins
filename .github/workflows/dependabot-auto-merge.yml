@@ -3,6 +3,8 @@ name: Dependabot PR Auto-Merge
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    paths-ignore:
+      - 'examples/**'
 
 jobs:
   dependabot-auto-merge:
@@ -32,7 +34,7 @@ jobs:
       - name: Run tests
         run: |
           go mod download
-          go test -v ./...
+          go test -v $(go list ./... | grep -v '/examples/')
 
       - name: Run benchmarks (quick)
         run: |
