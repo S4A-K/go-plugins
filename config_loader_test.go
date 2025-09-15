@@ -132,11 +132,7 @@ func addWindowsSpecificTestCases(testCases []CrossPlatformPathValidationTestCase
 		errorContains string
 	}{
 		// Note: ValidWindowsAbsolutePath test will be added dynamically with a real temp file
-		{
-			name:        "ValidWindowsUNCPath",
-			path:        "\\\\server\\share\\config.json",
-			expectError: false,
-		},
+		// Note: UNC path tests are skipped as they require specific network environment
 		{
 			name:          "WindowsReservedName_CON",
 			path:          "CON.json",
