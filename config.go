@@ -8,7 +8,6 @@ package goplugins
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/url"
 	"time"
 )
@@ -16,25 +15,23 @@ import (
 // TransportType represents the different transport protocols supported by the plugin system.
 //
 // Each transport type defines how plugins communicate with their underlying services:
-//   - HTTP/HTTPS: REST API communication over standard HTTP(S) protocols
 //   - gRPC: High-performance RPC communication with optional TLS
-//   - Unix sockets: Local inter-process communication via Unix domain sockets
-//   - Executable: Direct execution of external processes
+//   - Executable: Direct execution of external processes (subprocess plugins)
+//
+// Note: HTTP/HTTPS transports removed - subprocess model provides better security and isolation
 //
 // Example usage:
 //
 //	config := PluginConfig{
-//	    Transport: TransportHTTPS,
-//	    Endpoint:  "https://api.example.com/v1/plugin",
+//	    Transport: TransportGRPC,
+//	    Endpoint:  "localhost:50051",
 //	}
 type TransportType string
 
 const (
-	TransportHTTP       TransportType = "http"
-	TransportHTTPS      TransportType = "https"
-	TransportGRPC       TransportType = "grpc"
-	TransportGRPCTLS    TransportType = "grpc-tls"
-	TransportUnix       TransportType = "unix"
+	// HTTP transports removed - subprocess model provides better security
+	TransportGRPC       TransportType = "grpc"     // DEPRECATED: JSON over gRPC, use native protobuf instead
+	TransportGRPCTLS    TransportType = "grpc-tls" // DEPRECATED: JSON over gRPC, use native protobuf instead
 	TransportExecutable TransportType = "exec"
 )
 
@@ -404,6 +401,9 @@ type ManagerConfig struct {
 
 	// Plugin discovery settings
 	Discovery DiscoveryConfig `json:"discovery,omitempty" yaml:"discovery,omitempty"`
+
+	// Security configuration for plugin whitelisting
+	Security SecurityConfig `json:"security,omitempty" yaml:"security,omitempty"`
 }
 
 // DiscoveryConfig contains plugin auto-discovery settings for dynamic plugin loading.
@@ -482,12 +482,8 @@ func (pc *PluginConfig) validateNetworkTransport() error {
 // validateTransportConfig validates transport-specific configuration
 func (pc *PluginConfig) validateTransportConfig() error {
 	switch pc.Transport {
-	case TransportHTTP, TransportHTTPS, TransportGRPC, TransportGRPCTLS:
+	case TransportGRPC, TransportGRPCTLS:
 		return pc.validateNetworkTransport()
-	case TransportUnix:
-		if pc.Endpoint == "" {
-			return NewMissingSocketPathError()
-		}
 	case TransportExecutable:
 		if pc.Executable == "" {
 			return NewMissingExecutableError()
@@ -576,7 +572,6 @@ func (mc *ManagerConfig) Validate() error {
 	names := make(map[string]bool)
 	for i, plugin := range mc.Plugins {
 		if err := plugin.Validate(); err != nil {
-			slog.Error("Plugin validation failed", "plugin_index", i, "plugin_name", plugin.Name, "error", err)
 			return NewPluginValidationError(i, err)
 		}
 

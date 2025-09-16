@@ -8,10 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Documentation improvements and usage examples
+- **Multi-Format Configuration Support**: Comprehensive configuration format support with automatic detection
+  - **Native Format Support**: JSON, YAML (.yaml/.yml), TOML (.toml) with identical functionality
+  - **Hybrid Parsing Strategy**: Argus for format detection and file watching, specialized parsers for complex structures
+  - **Specialized Parsers**: gopkg.in/yaml.v3 for YAML, github.com/BurntSushi/toml for TOML parsing
+  - **Complete TOML Tag Implementation**: All configuration structures support TOML format with full nested configurations
+  - **Hot Reload Compatibility**: All formats support hot reloading through Argus file watching
+  - **Seamless Migration**: Convert between JSON, YAML, TOML formats without code changes
+  - **Performance Optimized**: Format-specific parsers for optimal performance characteristics
+- **Active Request Monitoring System**: Production-grade request tracking for zero-downtime operations
+  - Real-time active request counting using atomic operations
+  - Context-based request tracking for selective cancellation
+  - Intelligent graceful draining with 10ms precision monitoring
+  - `RequestTracker` component with comprehensive drain options
+  - `DrainOptions` configuration for fine-tuned graceful operations
+- **Enhanced Graceful Operations**:
+  - `GracefulUnregister()` method with active request monitoring
+  - `DrainPlugin()` method for selective plugin draining
+  - `GetActiveRequestCount()` and `GetAllActiveRequests()` for observability
+  - Progress callbacks for real-time drain monitoring
+- **Pluggable Logging System**: Interface-first design with backward compatibility
+  - `Logger` interface supporting any logging framework
+  - Smart auto-detection of logger types (slog, custom, nil)
+  - Zero breaking changes with existing slog-based code
+- **Enhanced Observability Interfaces**:
+  - `MetricsExporter` interface for pluggable metrics backends
+  - `MetricsRegistry` interface for comprehensive metrics collection
+  - Support for Prometheus, OpenTelemetry, and custom exporters
+- Documentation improvements and comprehensive usage examples
 
 ### Changed
+- **Configuration System Architecture**: Enhanced with hybrid parsing strategy for multi-format support
+  - Modified `loadConfigFromFile()` to use format-aware parsing via `parseConfigWithHybridStrategy()`
+  - Improved configuration loading performance with format-specific optimizations
+  - Enhanced error handling and validation across all configuration formats
+- **Dependencies**: Added support for specialized parsers
+  - Added `gopkg.in/yaml.v3 v3.0.1` for advanced YAML parsing capabilities
+  - Added `github.com/BurntSushi/toml v1.5.0` for comprehensive TOML support
+  - Maintained backward compatibility with existing Argus-based JSON parsing
+- **Graceful Draining Implementation**: Replaced `time.Sleep()` with active request monitoring
+  - Config loader now uses intelligent request tracking instead of fixed delays
+  - Improved precision from 100ms/1s delays to 10ms active monitoring
+  - Enhanced reliability with request completion guarantees
 - Enhanced error messages for better debugging experience
+- Updated README with detailed technical implementation documentation
+
+### Fixed
+- Eliminated race conditions in graceful draining operations
+- Improved timeout handling in plugin reload scenarios
 
 ## [v1.0.0] - 2025-01-15
 

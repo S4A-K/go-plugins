@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -31,6 +30,7 @@ import (
 	"time"
 
 	"github.com/agilira/argus"
+	"gopkg.in/yaml.v3"
 )
 
 // ReloadStrategy defines how plugins should be reloaded when configuration changes occur.
@@ -145,7 +145,7 @@ type ConfigWatcher[Req, Resp any] struct {
 	manager    *Manager[Req, Resp]
 	watcher    *argus.Watcher
 	configPath string
-	logger     *slog.Logger
+	logger     Logger
 	options    DynamicConfigOptions
 
 	// State management (following Lethe pattern)
@@ -217,10 +217,8 @@ func DefaultDynamicConfigOptions() DynamicConfigOptions {
 }
 
 // NewConfigWatcher creates a new configuration watcher powered by Argus
-func NewConfigWatcher[Req, Resp any](manager *Manager[Req, Resp], configPath string, options DynamicConfigOptions, logger *slog.Logger) (*ConfigWatcher[Req, Resp], error) {
-	if logger == nil {
-		logger = slog.Default()
-	}
+func NewConfigWatcher[Req, Resp any](manager *Manager[Req, Resp], configPath string, options DynamicConfigOptions, logger any) (*ConfigWatcher[Req, Resp], error) {
+	internalLogger := NewLogger(logger)
 
 	// Create Argus configuration optimized for config files
 	argusConfig := argus.Config{
@@ -230,7 +228,7 @@ func NewConfigWatcher[Req, Resp any](manager *Manager[Req, Resp], configPath str
 		Audit:                options.AuditConfig,
 		OptimizationStrategy: argus.OptimizationSingleEvent, // Config files = low latency priority
 		ErrorHandler: func(err error, filepath string) {
-			logger.Error("Argus file watching error", "error", err, "file", filepath)
+			internalLogger.Error("Argus file watching error", "error", err, "file", filepath)
 		},
 	}
 
@@ -241,7 +239,7 @@ func NewConfigWatcher[Req, Resp any](manager *Manager[Req, Resp], configPath str
 		manager:    manager,
 		watcher:    watcher,
 		configPath: configPath,
-		logger:     logger,
+		logger:     internalLogger,
 		options:    options,
 	}, nil
 }
@@ -412,9 +410,14 @@ func (cw *ConfigWatcher[Req, Resp]) loadConfigFromFile(path string) (ManagerConf
 		return config, fmt.Errorf("failed to read config file %s: %w", securePath, err)
 	}
 
-	// Parse JSON configuration with better error reporting
-	if err := json.Unmarshal(configBytes, &config); err != nil {
-		return config, fmt.Errorf("failed to unmarshal config from %s: %w", securePath, err)
+	// Parse configuration using hybrid approach:
+	// - Argus for format detection and simple formats
+	// - Specialized parsers for complex structured formats (YAML, TOML)
+	format := argus.DetectFormat(securePath)
+
+	// Use specialized parsers for complex structured formats
+	if err := parseConfigWithHybridStrategy(configBytes, format, &config); err != nil {
+		return config, fmt.Errorf("failed to parse %s config from %s: %w", format, securePath, err)
 	}
 
 	// Validate configuration structure and business rules
@@ -426,6 +429,38 @@ func (cw *ConfigWatcher[Req, Resp]) loadConfigFromFile(path string) (ManagerConf
 	config.ApplyDefaults()
 
 	return config, nil
+}
+
+// LoadConfigFromFile loads configuration from file with multi-format support.
+//
+// This function provides a public API for loading configuration files in multiple formats:
+//   - JSON (application/json)
+//   - YAML (application/yaml, .yml/.yaml)
+//   - TOML (application/toml)
+//   - HCL (Configuration Language)
+//   - INI (text/plain, .ini/.conf)
+//   - Properties (text/plain, .properties)
+//
+// Format detection is automatic based on file extension. The function includes:
+//   - Cross-platform path security validation
+//   - Comprehensive error handling with detailed context
+//   - Configuration validation and default application
+//   - Integration with Argus multi-format parsing engine
+//
+// Example usage:
+//
+//	config, err := goplugins.LoadConfigFromFile("config.yaml")
+//	if err != nil {
+//	    log.Fatalf("Failed to load config: %v", err)
+//	}
+func LoadConfigFromFile(path string) (ManagerConfig, error) {
+	// Create a temporary watcher instance just for path validation and parsing
+	// We reuse the existing secure validation and parsing logic
+	watcher := &ConfigWatcher[any, any]{
+		logger: NewLogger(nil),
+	}
+
+	return watcher.loadConfigFromFile(path)
 }
 
 // validateAndSecureFilePath implements cross-platform secure path validation.
@@ -526,7 +561,23 @@ func (cw *ConfigWatcher[Req, Resp]) validateOSSpecificPath(path string) error {
 
 // validateWindowsPath validates Windows-specific path requirements.
 func (cw *ConfigWatcher[Req, Resp]) validateWindowsPath(path string) error {
-	// Check for reserved Windows names
+	if err := cw.validateWindowsReservedNames(path); err != nil {
+		return err
+	}
+
+	if err := cw.validateWindowsCharacters(path); err != nil {
+		return err
+	}
+
+	if err := cw.validateWindowsColonUsage(path); err != nil {
+		return err
+	}
+
+	return cw.validateWindowsPathLength(path)
+}
+
+// validateWindowsReservedNames checks for Windows reserved filenames
+func (cw *ConfigWatcher[Req, Resp]) validateWindowsReservedNames(path string) error {
 	reservedNames := []string{"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4",
 		"COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
 		"LPT6", "LPT7", "LPT8", "LPT9"}
@@ -543,32 +594,45 @@ func (cw *ConfigWatcher[Req, Resp]) validateWindowsPath(path string) error {
 		}
 	}
 
-	// Check for invalid Windows characters, but handle drive letters properly
+	return nil
+}
+
+// validateWindowsCharacters checks for invalid Windows path characters
+func (cw *ConfigWatcher[Req, Resp]) validateWindowsCharacters(path string) error {
 	invalidChars := []string{"<", ">", "\"", "|", "?", "*"}
 	for _, char := range invalidChars {
 		if strings.Contains(path, char) {
 			return fmt.Errorf("invalid Windows path character: %s", char)
 		}
 	}
+	return nil
+}
 
-	// Special handling for colons: only valid as drive letter separator (e.g., C:)
+// validateWindowsColonUsage validates colon usage (only valid for drive letters)
+func (cw *ConfigWatcher[Req, Resp]) validateWindowsColonUsage(path string) error {
 	colonIndex := strings.Index(path, ":")
-	if colonIndex != -1 {
-		// Colon is only valid if it's at position 1 (drive letter like "C:")
-		// and there are no other colons in the path
-		if colonIndex != 1 || strings.Count(path, ":") > 1 {
-			// Check if this looks like a Windows drive letter
-			if colonIndex != 1 || len(path) < 2 || !((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) {
-				return fmt.Errorf("invalid Windows path character: colon")
-			}
-		}
+	if colonIndex == -1 {
+		return nil // No colon, valid
 	}
 
-	// Validate path length (Windows has 260 character limit for most APIs)
+	// Colon is only valid if it's at position 1 (drive letter like "C:")
+	if colonIndex != 1 || strings.Count(path, ":") > 1 {
+		return fmt.Errorf("invalid Windows path character: colon")
+	}
+
+	// Check if this looks like a valid Windows drive letter
+	if len(path) < 2 || !((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) {
+		return fmt.Errorf("invalid Windows path character: colon")
+	}
+
+	return nil
+}
+
+// validateWindowsPathLength validates Windows path length restrictions
+func (cw *ConfigWatcher[Req, Resp]) validateWindowsPathLength(path string) error {
 	if len(path) > 259 {
 		return fmt.Errorf("windows path too long: %d characters (max 259)", len(path))
 	}
-
 	return nil
 }
 
@@ -910,47 +974,112 @@ func (cw *ConfigWatcher[Req, Resp]) addPlugins(ctx context.Context, plugins []Pl
 // updatePluginsGracefully updates existing plugins with connection draining
 func (cw *ConfigWatcher[Req, Resp]) updatePluginsGracefully(ctx context.Context, updates []PluginUpdate) error {
 	for _, update := range updates {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		cw.logger.Info("Gracefully updating plugin",
-			"name", update.Name,
-			"changes", update.Changes)
-
-		// Check if changes require recreation
-		if cw.requiresRecreation(update.Changes) {
-			// Wait for connections to drain (simplified)
-			time.Sleep(100 * time.Millisecond) // Simplified drain for tests
-			// Remove and recreate plugin
-			if err := cw.manager.Unregister(update.Name); err != nil {
-				cw.logger.Error("Failed to unregister plugin", "name", update.Name, "error", err)
-				return fmt.Errorf("failed to unregister plugin %s: %w", update.Name, err)
-			}
-
-			factory, err := cw.manager.GetFactory(update.NewConfig.Type)
-			if err != nil {
-				cw.logger.Error("No factory found", "type", update.NewConfig.Type, "error", err)
-				return fmt.Errorf("failed to get factory for plugin type %s: %w", update.NewConfig.Type, err)
-			}
-
-			newPlugin, err := factory.CreatePlugin(update.NewConfig)
-			if err != nil {
-				cw.logger.Error("Failed to create new plugin", "name", update.Name, "error", err)
-				return fmt.Errorf("failed to create updated plugin %s: %w", update.Name, err)
-			}
-
-			if err := cw.manager.Register(newPlugin); err != nil {
-				cw.logger.Error("Failed to register new plugin", "name", update.Name, "error", err)
-				return fmt.Errorf("failed to register updated plugin %s: %w", update.Name, err)
-			}
-
-			cw.logger.Info("Successfully updated plugin", "name", update.Name)
+		if err := cw.updateSinglePlugin(ctx, update); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
+// updateSinglePlugin handles the update of a single plugin
+func (cw *ConfigWatcher[Req, Resp]) updateSinglePlugin(ctx context.Context, update PluginUpdate) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	cw.logger.Info("Gracefully updating plugin",
+		"name", update.Name,
+		"changes", update.Changes)
+
+	if !cw.requiresRecreation(update.Changes) {
+		return nil // No recreation needed
+	}
+
+	return cw.recreatePlugin(update)
+}
+
+// recreatePlugin handles the complete recreation of a plugin
+func (cw *ConfigWatcher[Req, Resp]) recreatePlugin(update PluginUpdate) error {
+	if err := cw.drainPlugin(update.Name); err != nil {
+		cw.logDrainError(update.Name, err)
+	}
+
+	if err := cw.unregisterPlugin(update.Name); err != nil {
+		return err
+	}
+
+	newPlugin, err := cw.createNewPlugin(update)
+	if err != nil {
+		return err
+	}
+
+	if err := cw.registerNewPlugin(update.Name, newPlugin); err != nil {
+		return err
+	}
+
+	cw.logger.Info("Successfully updated plugin", "name", update.Name)
+	return nil
+}
+
+// drainPlugin drains a plugin with monitoring
+func (cw *ConfigWatcher[Req, Resp]) drainPlugin(pluginName string) error {
+	drainOptions := DrainOptions{
+		DrainTimeout:            30 * time.Second,
+		ForceCancelAfterTimeout: true,
+		ProgressCallback: func(pluginName string, activeCount int64) {
+			cw.logger.Debug("Draining plugin requests",
+				"plugin", pluginName,
+				"activeRequests", activeCount)
+		},
+	}
+
+	return cw.manager.DrainPlugin(pluginName, drainOptions)
+}
+
+// logDrainError logs drain timeout errors with details
+func (cw *ConfigWatcher[Req, Resp]) logDrainError(pluginName string, err error) {
+	if drainErr, ok := err.(*DrainTimeoutError); ok {
+		cw.logger.Warn("Plugin drain timeout during update",
+			"plugin", pluginName,
+			"canceledRequests", drainErr.CanceledRequests,
+			"duration", drainErr.DrainDuration)
+	}
+}
+
+// unregisterPlugin unregisters a plugin with error handling
+func (cw *ConfigWatcher[Req, Resp]) unregisterPlugin(pluginName string) error {
+	if err := cw.manager.Unregister(pluginName); err != nil {
+		cw.logger.Error("Failed to unregister plugin", "name", pluginName, "error", err)
+		return fmt.Errorf("failed to unregister plugin %s: %w", pluginName, err)
+	}
+	return nil
+}
+
+// createNewPlugin creates a new plugin instance from the update config
+func (cw *ConfigWatcher[Req, Resp]) createNewPlugin(update PluginUpdate) (Plugin[Req, Resp], error) {
+	factory, err := cw.manager.GetFactory(update.NewConfig.Type)
+	if err != nil {
+		cw.logger.Error("No factory found", "type", update.NewConfig.Type, "error", err)
+		return nil, fmt.Errorf("failed to get factory for plugin type %s: %w", update.NewConfig.Type, err)
+	}
+
+	newPlugin, err := factory.CreatePlugin(update.NewConfig)
+	if err != nil {
+		cw.logger.Error("Failed to create new plugin", "name", update.Name, "error", err)
+		return nil, fmt.Errorf("failed to create updated plugin %s: %w", update.Name, err)
+	}
+
+	return newPlugin, nil
+}
+
+// registerNewPlugin registers the newly created plugin
+func (cw *ConfigWatcher[Req, Resp]) registerNewPlugin(pluginName string, plugin Plugin[Req, Resp]) error {
+	if err := cw.manager.Register(plugin); err != nil {
+		cw.logger.Error("Failed to register new plugin", "name", pluginName, "error", err)
+		return fmt.Errorf("failed to register updated plugin %s: %w", pluginName, err)
+	}
 	return nil
 }
 
@@ -965,11 +1094,9 @@ func (cw *ConfigWatcher[Req, Resp]) removePluginsGracefully(ctx context.Context,
 
 		cw.logger.Info("Gracefully removing plugin", "name", name)
 
-		// Simplified drain - in production this would be more sophisticated
-		time.Sleep(1 * time.Second)
-
-		if err := cw.manager.Unregister(name); err != nil {
-			cw.logger.Warn("Failed to unregister plugin", "plugin", name, "error", err)
+		// Use graceful unregister with proper drain timeout
+		if err := cw.manager.GracefulUnregister(name, 30*time.Second); err != nil {
+			cw.logger.Warn("Failed to gracefully unregister plugin", "plugin", name, "error", err)
 		} else {
 			cw.logger.Info("Successfully removed plugin", "name", name)
 		}
@@ -1022,7 +1149,7 @@ func (cw *ConfigWatcher[Req, Resp]) GetWatcherStats() argus.CacheStats {
 //		defer watcher.Stop()
 //		log.Println("✅ Argus-powered dynamic configuration enabled!")
 //	}
-func EnableDynamicConfig[Req, Resp any](manager *Manager[Req, Resp], configPath string, options DynamicConfigOptions, logger *slog.Logger) (*ConfigWatcher[Req, Resp], error) {
+func EnableDynamicConfig[Req, Resp any](manager *Manager[Req, Resp], configPath string, options DynamicConfigOptions, logger Logger) (*ConfigWatcher[Req, Resp], error) {
 	watcher, err := NewConfigWatcher(manager, configPath, options, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create dynamic config watcher: %w", err)
@@ -1079,10 +1206,10 @@ func CreateSampleConfig(filename string) error {
 		},
 		Plugins: []PluginConfig{
 			{
-				Name:      "example-http-plugin",
-				Type:      "http",
-				Transport: TransportHTTPS,
-				Endpoint:  "https://api.example.com/v1/process",
+				Name:      "example-grpc-plugin",
+				Type:      "grpc",
+				Transport: TransportGRPCTLS,
+				Endpoint:  "api.example.com:443",
 				Priority:  1,
 				Enabled:   true,
 				Auth: AuthConfig{
@@ -1161,5 +1288,80 @@ func writeConfigFileUnix(filename string, data []byte) error {
 		return fmt.Errorf("failed to write config file on Unix: %w", err)
 	}
 
+	return nil
+}
+
+// bindManagerConfig converts configuration map to ManagerConfig struct.
+// This handles the bridge between Argus multi-format parsing and ManagerConfig.
+// Supports all configuration formats through Argus: JSON, YAML, TOML, HCL, INI, Properties.
+func bindManagerConfig(configMap map[string]interface{}, config *ManagerConfig) error {
+	// Since ManagerConfig is a complex nested structure with plugins array,
+	// we convert the parsed map back to JSON and use traditional unmarshaling.
+	// This maintains full compatibility while benefiting from multi-format parsing.
+
+	if configMap == nil {
+		return fmt.Errorf("configuration map is nil")
+	}
+
+	// Convert map to JSON for traditional unmarshaling
+	jsonBytes, err := json.Marshal(configMap)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config map to JSON: %w", err)
+	}
+
+	// Use traditional JSON unmarshaling for complex nested structure
+	if err := json.Unmarshal(jsonBytes, config); err != nil {
+		return fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	return nil
+}
+
+// parseConfigWithHybridStrategy uses Argus for simple formats but specialized parsers for complex ones.
+// This provides the benefits of Argus (format detection, watching) while supporting full YAML specs.
+//
+// Strategy:
+//   - JSON: Use Argus (fast, simple)
+//   - YAML: Use gopkg.in/yaml.v3 (full YAML spec support)
+//   - Others: Use Argus (TOML, HCL, INI, Properties)
+func parseConfigWithHybridStrategy(configBytes []byte, format argus.ConfigFormat, config *ManagerConfig) error {
+	switch format {
+	case argus.FormatJSON:
+		// Use Argus for JSON (simple and efficient)
+		configMap, err := argus.ParseConfig(configBytes, format)
+		if err != nil {
+			return err
+		}
+		return bindManagerConfig(configMap, config)
+
+	case argus.FormatYAML:
+		// Use specialized YAML parser for full spec support
+		return parseYAMLConfig(configBytes, config)
+
+	case argus.FormatTOML:
+		// Use Argus for TOML parsing (simplified and efficient approach)
+		configMap, err := argus.ParseConfig(configBytes, format)
+		if err != nil {
+			return err
+		}
+		return bindManagerConfig(configMap, config)
+
+	default:
+		// Use Argus for other formats (HCL, INI, Properties)
+		configMap, err := argus.ParseConfig(configBytes, format)
+		if err != nil {
+			return err
+		}
+		return bindManagerConfig(configMap, config)
+	}
+}
+
+// parseYAMLConfig parses YAML configuration using gopkg.in/yaml.v3 for full spec support.
+// This handles complex YAML structures including arrays, nested objects, and multi-line values.
+func parseYAMLConfig(configBytes []byte, config *ManagerConfig) error {
+	// Parse YAML directly into ManagerConfig struct
+	if err := yaml.Unmarshal(configBytes, config); err != nil {
+		return fmt.Errorf("failed to parse YAML config: %w", err)
+	}
 	return nil
 }

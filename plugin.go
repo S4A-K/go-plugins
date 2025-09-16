@@ -20,8 +20,8 @@ import (
 //   - StatusUnhealthy: Plugin has issues but may still handle some requests
 //   - StatusOffline: Plugin is not responding and should not receive requests
 //
-// These statuses are used by load balancers, circuit breakers, and health
-// monitoring systems to make routing and recovery decisions.
+// These statuses are used by circuit breakers and health monitoring systems
+// to make routing and recovery decisions.
 type PluginStatus int
 
 const (
@@ -50,8 +50,8 @@ func (s PluginStatus) String() string {
 // HealthStatus contains comprehensive health information about a plugin instance.
 //
 // This structure provides detailed health assessment data used by monitoring
-// systems, load balancers, and circuit breakers to make intelligent routing
-// and recovery decisions. It includes both current status and historical
+// systems and circuit breakers to make intelligent routing and recovery
+// decisions. It includes both current status and historical
 // timing information for trend analysis.
 //
 // Fields:
@@ -154,8 +154,8 @@ type Plugin[Req, Resp any] interface {
 	Close() error
 }
 
-// PluginManager manages a collection of plugins and provides load balancing,
-// circuit breaking, and health monitoring
+// PluginManager manages a collection of plugins and provides circuit breaking
+// and health monitoring
 type PluginManager[Req, Resp any] interface {
 	// Register adds a plugin to the manager
 	Register(plugin Plugin[Req, Resp]) error

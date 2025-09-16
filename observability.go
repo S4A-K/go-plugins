@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -378,7 +377,7 @@ type ObservableManager[Req, Resp any] struct {
 	config           ObservabilityConfig
 	metricsCollector MetricsCollector
 	tracingProvider  TracingProvider
-	logger           *slog.Logger
+	logger           Logger
 
 	// Runtime metrics
 	startTime      time.Time
@@ -700,17 +699,17 @@ func (om *ObservableManager[Req, Resp]) recordToMetricsCollector(pluginName stri
 func (om *ObservableManager[Req, Resp]) logRequest(pluginName string, execCtx ExecutionContext, latency time.Duration, err error) {
 	if err != nil {
 		om.logger.Warn("Plugin request failed",
-			slog.String("plugin", pluginName),
-			slog.String("request_id", execCtx.RequestID),
-			slog.Duration("latency", latency),
-			slog.Bool("success", false),
-			slog.String("error", err.Error()))
+			"plugin", pluginName,
+			"request_id", execCtx.RequestID,
+			"latency", latency,
+			"success", false,
+			"error", err.Error())
 	} else {
 		om.logger.Debug("Plugin request completed",
-			slog.String("plugin", pluginName),
-			slog.String("request_id", execCtx.RequestID),
-			slog.Duration("latency", latency),
-			slog.Bool("success", true))
+			"plugin", pluginName,
+			"request_id", execCtx.RequestID,
+			"latency", latency,
+			"success", true)
 	}
 }
 
@@ -1244,7 +1243,6 @@ func isStructuredConnectionError(err error) bool {
 		return code == ErrCodePluginConnectionFailed ||
 			code == ErrCodeHTTPTransportError ||
 			code == ErrCodeGRPCTransportError ||
-			code == ErrCodeUnixTransportError ||
 			code == ErrCodeExecTransportError
 	}
 	return false

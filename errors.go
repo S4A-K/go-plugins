@@ -1,6 +1,7 @@
-// errors.go: Structured error definitions for the go-plugins system
+// errors.go: structured error definitions for the go-plugins system
 //
 // Copyright (c) 2025 AGILira - A. Giordano
+// Series: an AGILira library
 // SPDX-License-Identifier: MPL-2.0
 
 package goplugins
@@ -17,12 +18,12 @@ const (
 	ErrCodeMissingEndpoint       = "PLUGIN_1003"
 	ErrCodeInvalidEndpointURL    = "PLUGIN_1004"
 	ErrCodeInvalidEndpointFormat = "PLUGIN_1005"
-	ErrCodeMissingSocketPath     = "PLUGIN_1006"
-	ErrCodeMissingExecutable     = "PLUGIN_1007"
-	ErrCodeUnsupportedTransport  = "PLUGIN_1008"
-	ErrCodeNoPluginsConfigured   = "PLUGIN_1009"
-	ErrCodeDuplicatePluginName   = "PLUGIN_1010"
-	ErrCodeInvalidJSONConfig     = "PLUGIN_1011"
+
+	ErrCodeMissingExecutable    = "PLUGIN_1007"
+	ErrCodeUnsupportedTransport = "PLUGIN_1008"
+	ErrCodeNoPluginsConfigured  = "PLUGIN_1009"
+	ErrCodeDuplicatePluginName  = "PLUGIN_1010"
+	ErrCodeInvalidJSONConfig    = "PLUGIN_1011"
 
 	// Authentication errors (1100-1199)
 	ErrCodeMissingAPIKey           = "AUTH_1101"
@@ -41,7 +42,7 @@ const (
 	// Transport errors (1300-1399)
 	ErrCodeHTTPTransportError = "TRANSPORT_1301"
 	ErrCodeGRPCTransportError = "TRANSPORT_1302"
-	ErrCodeUnixTransportError = "TRANSPORT_1303"
+
 	ErrCodeExecTransportError = "TRANSPORT_1304"
 
 	// Circuit breaker errors (1400-1499)
@@ -55,9 +56,7 @@ const (
 	ErrCodeHealthCheckFailed  = "HEALTH_1601"
 	ErrCodeHealthCheckTimeout = "HEALTH_1602"
 
-	// Load balancer errors (1700-1799)
-	ErrCodeNoAvailablePlugins = "LOADBALANCER_1701"
-	ErrCodeLoadBalancerFailed = "LOADBALANCER_1702"
+	// Load balancer errors removed - using direct subprocess communication
 )
 
 // Configuration error constructors
@@ -100,12 +99,6 @@ func NewInvalidEndpointURLError(endpoint string, cause error) *errors.Error {
 func NewInvalidEndpointFormatError() *errors.Error {
 	return errors.New(ErrCodeInvalidEndpointFormat, "Invalid endpoint format").
 		WithUserMessage("Endpoint URL must have both scheme and host").
-		WithSeverity("error")
-}
-
-func NewMissingSocketPathError() *errors.Error {
-	return errors.New(ErrCodeMissingSocketPath, "Missing socket path").
-		WithUserMessage("Socket path is required for unix transport").
 		WithSeverity("error")
 }
 
@@ -229,12 +222,6 @@ func NewGRPCTransportError(cause error) *errors.Error {
 		AsRetryable()
 }
 
-func NewUnixTransportError(cause error) *errors.Error {
-	return errors.Wrap(cause, ErrCodeUnixTransportError, "Unix transport error").
-		WithUserMessage("Unix socket transport operation failed").
-		WithSeverity("error")
-}
-
 func NewExecTransportError(cause error) *errors.Error {
 	return errors.Wrap(cause, ErrCodeExecTransportError, "Executable transport error").
 		WithUserMessage("Executable transport operation failed").
@@ -287,21 +274,7 @@ func NewHealthCheckTimeoutError(pluginName string, timeout interface{}) *errors.
 		AsRetryable()
 }
 
-// Load balancer error constructors
-
-func NewNoAvailablePluginsError(pluginType string) *errors.Error {
-	return errors.New(ErrCodeNoAvailablePlugins, "No available plugins").
-		WithUserMessage("No healthy plugins available for the requested type").
-		WithContext("plugin_type", pluginType).
-		WithSeverity("error")
-}
-
-func NewLoadBalancerFailedError(cause error) *errors.Error {
-	return errors.Wrap(cause, ErrCodeLoadBalancerFailed, "Load balancer failed").
-		WithUserMessage("Load balancer operation failed").
-		WithSeverity("error").
-		AsRetryable()
-}
+// Load balancer error constructors removed - using direct subprocess communication
 
 // Validation error constructor for plugin configuration with detailed validation context
 

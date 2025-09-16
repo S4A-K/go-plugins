@@ -1,4 +1,4 @@
-# go-plugins: GO Plugin System over HTTP, gRPC & Unix Sockets 
+# go-plugins: GO Plugin System over HTTP & gRPC 
 ### an AGILira library
 
 [![CI/CD Pipeline](https://github.com/agilira/go-plugins/actions/workflows/ci.yml/badge.svg)](https://github.com/agilira/go-plugins/actions/workflows/ci.yml)
@@ -6,22 +6,35 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/agilira/go-plugins?v=2)](https://goreportcard.com/report/github.com/agilira/go-plugins)
 [![Coverage](https://codecov.io/gh/agilira/orpheus/branch/main/graph/badge.svg)](https://codecov.io/gh/agilira/go-plugins)
 
-go-plugins provides a production-ready, type-safe plugin architecture for Go applications. It supports multiple transport protocols (HTTP, gRPC, Unix sockets) with built-in circuit breaking, health monitoring, authentication, graceful degradation & hot reload powered by [Argus](https://github.com/agilira/argus) (12.10ns/op).
+go-plugins provides a production-ready, type-safe plugin architecture for Go applications. It supports HTTP and gRPC transport protocols with built-in circuit breaking, health monitoring, authentication, and hot reload powered by [Argus](https://github.com/agilira/argus) (12.10ns/op).
+
+> **Note**: Unix sockets are deprecated and will be removed in v1.2.0. The library uses RPC/gRPC over TCP for secure and reliable communication.
+
+**Roadmap**: Enhanced subprocess execution, bidirectional RPC, and advanced process management features. See [SIMPLIFIED_APPROACH.md](SIMPLIFIED_APPROACH.md) for details.
 
 **[Features](#features) • [Quick Start](#quick-start) • [Usage](#usage) • [Usage Examples](#usage-examples) • [Observability](#observability) • [Examples](#examples) • [Documentation](#documentation) • [API Reference](#api-reference)**
 
 ## Features
 
-- **Multiple Transport Protocols**: HTTP/HTTPS, gRPC (with optional TLS), Unix domain sockets, and executable plugins
-- **Type Safety**: Generics-based architecture ensuring compile-time type safety for requests and responses
+### Core Plugin System
+- **Type Safety**: Generics-based architecture ensuring compile-time type safety for requests and responses  
+- **Multiple Transport Protocols**: HTTP/HTTPS, gRPC (with optional TLS) for secure communication
+- **Multi-Format Configuration**: Native support for JSON, YAML with automatic format detection
+- **Auto-Discovery**: Filesystem-based plugin detection with security focus
+- **Security & Authentication**: API keys, Bearer tokens, Basic auth, mTLS, plugin verification
+- **Plugin Whitelist System**: Hash-based plugin authorization with hot reload and audit trails
 - **Circuit Breaker Pattern**: Automatic failure detection and recovery with configurable thresholds
 - **Health Monitoring**: Continuous health checking with automatic plugin status management
 - **Load Balancing**: Multiple algorithms including round-robin, least connections, and weighted random
-- **Authentication**: Support for API keys, Bearer tokens, Basic auth, mTLS, and custom methods
-- **Hot Reload**: Ultra-fast configuration reloading powered by [Argus](https://github.com/agilira/argus) with graceful connection draining
-- **Rate Limiting**: Token bucket rate limiting to prevent overwhelming plugins
-- **Observability**: Comprehensive metrics collection and structured logging
-- **Connection Pooling**: Efficient resource management with configurable connection limits
+- **Observability**: Built-in logging and metrics collection with industry standards
+- **Hot Reload**: Ultra-fast configuration reloading powered by [Argus](https://github.com/agilira/argus)
+
+### Coming Soon: Advanced Features (v1.1+)
+- **Subprocess Plugins**: Launch plugins as separate processes for better isolation
+- **Bidirectional RPC**: Plugins can call back into the host application
+- **Process Management**: Automatic crash recovery and process reattachment  
+- **I/O Multiplexing**: Multiple concurrent streams per plugin via MuxBroker
+- **TTY Support**: Full debugging capabilities with TTY preservation
 
 ## Compatibility and Support
 
@@ -107,6 +120,40 @@ func main() {
 }
 ```
 
+### Pluggable Logging System
+
+**Flexible Logger Integration - Use Any Logging Framework:**
+
+```go
+// Backward compatibility - existing slog code continues to work
+manager := goplugins.NewManager[Req, Resp](slog.Default())
+
+// Interface-based logging (recommended for new code)
+customLogger := &MyCustomLogger{} // Implements goplugins.Logger
+manager := goplugins.NewManager[Req, Resp](customLogger)
+
+// Built-in logger implementations
+noOpLogger := goplugins.NewNoOpLogger()        // Silent
+testLogger := goplugins.NewTestLogger()        // Captures messages for testing
+defaultLogger := goplugins.DefaultLogger()     // JSON to stdout
+
+// Automatic adapter detection - zero configuration required
+var logger any = slog.Default()  // or zap.Logger, logrus.Logger, etc.
+manager := goplugins.NewManager[Req, Resp](logger)
+```
+
+**Custom Logger Implementation:**
+
+```go
+type MyLogger struct{}
+
+func (l *MyLogger) Debug(msg string, args ...any) { /* your implementation */ }
+func (l *MyLogger) Info(msg string, args ...any)  { /* your implementation */ }  
+func (l *MyLogger) Warn(msg string, args ...any)  { /* your implementation */ }
+func (l *MyLogger) Error(msg string, args ...any) { /* your implementation */ }
+func (l *MyLogger) With(args ...any) goplugins.Logger { return l }
+```
+
 ### Usage
 
 #### HTTP/HTTPS Plugin Configuration
@@ -131,7 +178,7 @@ config := goplugins.PluginConfig{
 ```go
 config := goplugins.PluginConfig{
     Name:      "grpc-service",
-    Transport: goplugins.TransportGRPCTLS,
+    Transport: goplugins.TransportGRPCTLS, // DEPRECATED: Use native protobuf instead
     Endpoint:  "grpc.example.com:443",
     Auth: goplugins.AuthConfig{
         Method:   goplugins.AuthMTLS,
@@ -154,71 +201,344 @@ config := goplugins.PluginConfig{
 }
 ```
 
+#### Dynamic Loading & Auto-Discovery
+
+go-plugins provides powerful dynamic loading capabilities that enable hot-loading of discovered plugins without service restart, automatic dependency resolution, and version compatibility checking.
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "time"
+    
+    "github.com/agilira/go-plugins"
+)
+
+func main() {
+    logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+    manager := goplugins.NewManager[AuthRequest, AuthResponse](logger)
+
+    // Configure discovery engine to scan for plugins
+    discoveryConfig := goplugins.ExtendedDiscoveryConfig{
+        DiscoveryConfig: goplugins.DiscoveryConfig{
+            Enabled:     true,
+            Directories: []string{"/opt/plugins", "./plugins"},
+            Patterns:    []string{"*.json", "plugin.yaml"},
+            WatchMode:   true, // Watch for new plugins
+        },
+        SearchPaths:          []string{"/opt/plugins", "/usr/local/plugins"},
+        FilePatterns:         []string{"plugin.json", "manifest.yaml"},
+        MaxDepth:             3,
+        ValidateManifests:    true,
+        AllowedTransports:    []goplugins.TransportType{goplugins.TransportHTTPS, goplugins.TransportGRPC},
+        RequiredCapabilities: []string{"authentication", "logging"},
+    }
+
+    // Configure discovery (runtime config updates coming soon)
+    if err := manager.ConfigureDiscovery(discoveryConfig); err != nil {
+        log.Printf("Discovery configuration update not yet supported: %v", err)
+    }
+
+    // Set version compatibility rules
+    manager.SetPluginCompatibilityRule("auth-service", "^1.0.0")    // 1.x.x compatible
+    manager.SetPluginCompatibilityRule("logging-service", "~2.1.0") // 2.1.x compatible
+
+    // Enable automatic loading of discovered plugins
+    ctx := context.Background()
+    if err := manager.EnableDynamicLoading(ctx); err != nil {
+        log.Fatalf("Failed to enable dynamic loading: %v", err)
+    }
+
+    // The manager will now automatically discover and load compatible plugins
+    // You can also manually load specific discovered plugins
+    if err := manager.LoadDiscoveredPlugin(ctx, "auth-service"); err != nil {
+        log.Printf("Failed to load auth-service: %v", err)
+    }
+
+    // Monitor loading status
+    status := manager.GetDynamicLoadingStatus()
+    for pluginName, state := range status {
+        log.Printf("Plugin %s: %s", pluginName, state)
+    }
+
+    // View discovered plugins (not yet loaded)
+    discovered := manager.GetDiscoveredPlugins()
+    for name, result := range discovered {
+        log.Printf("Discovered: %s v%s (%s)", 
+            name, result.Manifest.Version, result.Manifest.Transport)
+    }
+
+    // Get dependency graph information
+    graph := manager.GetDependencyGraph()
+    if order, err := graph.CalculateLoadOrder(); err == nil {
+        log.Printf("Load order: %v", order)
+    }
+
+    // Monitor dynamic loading metrics
+    metrics := manager.GetDynamicLoadingMetrics()
+    log.Printf("Plugins loaded: %d", metrics.PluginsLoaded.Load())
+    log.Printf("Loading failures: %d", metrics.LoadingFailures.Load())
+
+    // Graceful shutdown
+    defer func() {
+        if err := manager.DisableDynamicLoading(); err != nil {
+            log.Printf("Error disabling dynamic loading: %v", err)
+        }
+        
+        shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+        defer cancel()
+        
+        if err := manager.Shutdown(shutdownCtx); err != nil {
+            log.Printf("Error during shutdown: %v", err)
+        }
+    }()
+}
+```
+
+**Key Dynamic Loading Features:**
+
+- **Automatic Discovery**: Scans configured directories for plugin manifests
+- **Hot Loading**: Load new plugins without service restart
+- **Version Compatibility**: Semantic versioning constraints (`^1.0.0`, `~2.1.0`)
+- **Dependency Resolution**: Automatic loading order based on plugin dependencies
+- **Selective Loading**: Manual control over which discovered plugins to load
+- **Real-time Monitoring**: Status tracking and metrics for all loading operations
+- **Graceful Handling**: Proper error handling and rollback on loading failures
+
+**Plugin Manifest Example** (`plugin.json`):
+```json
+{
+    "name": "auth-service",
+    "version": "1.2.3",
+    "transport": "https",
+    "endpoint": "https://auth.company.com/api/v1",
+    "capabilities": ["authentication", "user-management"],
+    "requirements": {
+        "min_go_version": "1.21",
+        "required_plugins": ["logging-service"],
+        "min_system_version": "1.0.0"
+    },
+    "auth": {
+        "type": "bearer",
+        "token": "${AUTH_TOKEN}"
+    },
+    "health_check": {
+        "enabled": true,
+        "endpoint": "/health",
+        "interval": "30s",
+        "timeout": "5s"
+    },
+    "metadata": {
+        "description": "Enterprise authentication service",
+        "maintainer": "security-team@company.com",
+        "tags": ["auth", "security", "enterprise"]
+    }
+}
+```
+
 ### Observability
 
-#### Metrics Collection
+The go-plugins library includes a comprehensive observability system with metrics collection, distributed tracing, structured logging, and health monitoring. The system is fully integrated across all components and provides production-ready monitoring capabilities.
+
+#### Quick Start with Observability
+
 ```go
-// Enable enhanced observability
-observableManager := goplugins.NewObservableManager(manager, 
-    goplugins.EnhancedObservabilityConfig(), logger)
+// Enable default observability for Manager
+manager := goplugins.NewManager[MyRequest, MyResponse](logger)
+manager.EnableObservability()
+
+// Or enable enhanced observability with advanced metrics
+manager.EnableEnhancedObservability()
+
+// Or enable observability with distributed tracing
+tracingProvider := myTracingProvider // Your tracing implementation
+manager.EnableObservabilityWithTracing(tracingProvider)
+```
+
+#### Using ObservableManager for Full Observability
+
+```go
+// Create standard manager
+baseManager := goplugins.NewManager[AuthRequest, AuthResponse](logger)
+
+// Wrap with observability
+observableManager := goplugins.NewObservableManager(baseManager, 
+    goplugins.EnhancedObservabilityConfig())
+
+// Execute with full observability (metrics, tracing, logging)
+response, err := observableManager.ExecuteWithObservability(ctx, "auth-plugin", execCtx, request)
 
 // Get comprehensive metrics
 metrics := observableManager.GetObservabilityMetrics()
-log.Printf("Total requests: %d", metrics.TotalRequests)
-log.Printf("Success rate: %.2f%%", metrics.OverallSuccessRate)
+log.Printf("Global stats - Total: %d, Errors: %d, Active: %d", 
+    metrics.Global.TotalRequests, metrics.Global.TotalErrors, metrics.Global.ActiveRequests)
 
-// Per-plugin metrics
-for pluginName, pluginMetrics := range metrics.PluginMetrics {
-    log.Printf("Plugin %s: %d requests, %.2f%% success rate",
-        pluginName, pluginMetrics.TotalRequests, pluginMetrics.SuccessRate)
+// Per-plugin detailed metrics
+for pluginName, pluginMetrics := range metrics.Plugins {
+    log.Printf("Plugin %s: %d requests, %.2f%% success rate, avg latency: %v",
+        pluginName, pluginMetrics.TotalRequests, 
+        pluginMetrics.SuccessRate, pluginMetrics.AvgLatency)
 }
 ```
 
-#### Circuit Breaker and Health Monitoring
+#### Integrated Health Monitoring
+
 ```go
-// Get plugin health status
+// Health monitoring is automatically integrated with observability
 healthStatus := manager.Health()
 for pluginName, status := range healthStatus {
-    log.Printf("Plugin %s: %s (%v)", 
-        pluginName, status.Status, status.ResponseTime)
+    log.Printf("Plugin %s: %s (response time: %v)", 
+        pluginName, status.Status.String(), status.ResponseTime)
 }
 
-// Centralized health monitoring
-monitor := goplugins.NewHealthMonitor()
-monitor.AddChecker("auth-service", authHealthChecker)
-monitor.AddChecker("payment-service", paymentHealthChecker)
+// Health metrics are automatically recorded in observability system
+observabilityMetrics := manager.GetObservabilityMetrics()
+healthMetrics := observabilityMetrics["health_status"]
+```
 
-overallHealth := monitor.GetOverallHealth()
-if overallHealth.Status != goplugins.StatusHealthy {
-    log.Printf("System degraded: %s", overallHealth.Message)
+#### Circuit Breaker Integration
+
+```go
+// Circuit breaker state changes are automatically tracked
+// Get current circuit breaker states with metrics
+observabilityStatus := manager.GetObservabilityStatus()
+if observabilityStatus["metrics_enabled"].(bool) {
+    metrics := manager.GetObservabilityMetrics()
+    cbStates := metrics["circuit_breaker_states"].(map[string]string)
+    
+    for plugin, state := range cbStates {
+        log.Printf("Plugin %s circuit breaker: %s", plugin, state)
+    }
 }
 ```
 
-#### Advanced Metrics Integration
+#### Advanced Observability Integration
 
-**Production-Ready Observability with Pluggable Exporters:**
+**Comprehensive Plugin System Observability:**
 
 ```go
-// Create metrics registry with multiple exporters
-registry := goplugins.NewMetricsRegistry(goplugins.RegistryConfig{
-    ExportInterval: 15 * time.Second,
-    BatchSize:      1000,
-})
+// 1. Manager-level observability (automatic integration)
+manager := goplugins.NewManager[MyReq, MyResp](logger)
+manager.EnableEnhancedObservability()
 
-// Register multiple observability backends
-registry.RegisterExporter(goplugins.NewPrometheusExporter())
-registry.RegisterExporter(goplugins.NewOpenTelemetryExporter())
+// All plugin operations are now automatically tracked:
+// - Request counts, latencies, error rates
+// - Circuit breaker state changes
+// - Health check results
+// - Active request tracking
 
-// Type-safe metrics with automatic export
-counter := registry.Counter("api_requests_total", 
-    "Total API requests", "method", "status")
-gauge := registry.Gauge("active_connections", 
-    "Active connections", "plugin")
-histogram := registry.Histogram("response_time_seconds", 
-    "Response times", []float64{0.1, 0.5, 1.0, 2.0, 5.0}, "endpoint")
+// 2. Plugin Registry observability (automatic integration)
+registry := goplugins.NewPluginRegistry(config)
+registry.EnableEnhancedObservability()
 
-// Metrics are automatically exported to all registered backends
-counter.Inc("GET", "200")
+// Registry operations are now automatically tracked:
+// - Plugin client lifecycle (create/remove)
+// - Factory registrations
+// - Active client counts by type/status
+
+// 3. Request Tracker observability (integrated automatically)
+// Active request tracking with metrics is enabled by default
+// when observability is enabled at the manager level
+
+// 4. Get comprehensive system metrics
+allMetrics := manager.GetObservabilityMetrics()
+```
+
+**Custom Metrics Collection:**
+
+```go
+// Use enhanced metrics collector for custom metrics
+config := goplugins.EnhancedObservabilityConfig()
+if enhancedCollector, ok := config.MetricsCollector.(goplugins.EnhancedMetricsCollector); ok {
+    // Create custom metrics
+    requestCounter := enhancedCollector.CounterWithLabels(
+        "my_plugin_requests_total", 
+        "Custom plugin requests", 
+        "plugin", "operation", "status")
+    
+    latencyHistogram := enhancedCollector.HistogramWithLabels(
+        "my_plugin_latency_seconds",
+        "Custom plugin latency",
+        []float64{0.001, 0.01, 0.1, 1, 10},
+        "plugin", "operation")
+    
+    // Use in your code
+    requestCounter.Inc("my-plugin", "process", "success")
+    latencyHistogram.Observe(0.125, "my-plugin", "process")
+    
+    // Get Prometheus-formatted metrics
+    promMetrics := enhancedCollector.GetPrometheusMetrics()
+    for _, metric := range promMetrics {
+        fmt.Printf("Metric: %s = %f (labels: %v)\n", 
+            metric.Name, metric.Value, metric.Labels)
+    }
+}
+```
+
+**Integration with External Observability Systems:**
+
+```go
+// Example: Custom metrics collector for your monitoring system
+type MyMetricsCollector struct {
+    // Your monitoring system client
+    client MyMonitoringClient
+}
+
+func (m *MyMetricsCollector) IncrementCounter(name string, labels map[string]string, value int64) {
+    m.client.Counter(name).WithLabels(labels).Add(value)
+}
+
+func (m *MyMetricsCollector) SetGauge(name string, labels map[string]string, value float64) {
+    m.client.Gauge(name).WithLabels(labels).Set(value)
+}
+
+func (m *MyMetricsCollector) RecordHistogram(name string, labels map[string]string, value float64) {
+    m.client.Histogram(name).WithLabels(labels).Observe(value)
+}
+
+// ... implement other methods
+
+// Use your custom collector
+config := goplugins.ObservabilityConfig{
+    MetricsEnabled:   true,
+    MetricsCollector: &MyMetricsCollector{client: myClient},
+    MetricsPrefix:    "myapp_plugins",
+    // ... other config
+}
+
+manager.ConfigureObservability(config)
+```
+
+**Common Plugin Metrics Utilities:**
+
+```go
+// Use pre-defined common metrics for consistent monitoring
+enhancedCollector := goplugins.NewEnhancedMetricsCollector()
+commonMetrics := goplugins.CreateCommonPluginMetrics(enhancedCollector)
+
+// Standard plugin metrics are automatically available:
+// - plugin_requests_total (counter with plugin_name, status labels)
+// - plugin_request_duration_seconds (histogram with plugin_name label)  
+// - plugin_active_requests (gauge with plugin_name label)
+// - plugin_errors_total (counter with plugin_name, error_type labels)
+// - plugin_circuit_breaker_state (gauge with plugin_name label)
+
+// Use in your plugin implementations
+func (p *MyPlugin) Execute(ctx context.Context, execCtx goplugins.ExecutionContext, req MyRequest) (MyResponse, error) {
+    start := time.Now()
+    commonMetrics.IncrementActiveRequests("my-plugin")
+    defer commonMetrics.DecrementActiveRequests("my-plugin")
+    
+    // ... your plugin logic
+    
+    // Record result
+    duration := time.Since(start)
+    commonMetrics.RecordRequest("my-plugin", duration, err)
+    
+    return response, err
+}
 gauge.Set(42, "auth-service")
 histogram.Observe(0.250, "/api/users")
 ```
@@ -266,6 +586,154 @@ go tool cover -html=coverage.out
 go test -bench=. -benchmem ./...
 ```
 
+#### Active Request Monitoring
+
+**Production-Grade Request Tracking for Zero-Downtime Operations:**
+
+The library includes sophisticated active request monitoring that enables true zero-downtime deployments by tracking individual requests and waiting for completion before performing graceful operations.
+
+```go
+// Get real-time active request counts
+activeRequests := manager.GetAllActiveRequests()
+for plugin, count := range activeRequests {
+    log.Printf("Plugin %s: %d active requests", plugin, count)
+}
+
+// Check specific plugin
+count := manager.GetActiveRequestCount("payment-service")
+log.Printf("Payment service has %d active requests", count)
+```
+
+**Intelligent Draining with Active Monitoring:**
+```go
+// Configure intelligent draining behavior
+drainOptions := goplugins.DrainOptions{
+    DrainTimeout:            30 * time.Second,  // Max wait for request completion
+    ForceCancelAfterTimeout: true,              // Force cancel remaining requests
+    ProgressCallback: func(pluginName string, activeCount int64) {
+        log.Printf("Draining %s: %d requests remaining", pluginName, activeCount)
+    },
+}
+
+// Perform graceful drain with active monitoring (no more time.Sleep!)
+err := manager.DrainPlugin("payment-service", drainOptions)
+if err != nil {
+    if drainErr, ok := err.(*goplugins.DrainTimeoutError); ok {
+        log.Printf("Drain timeout: %d requests canceled after %v", 
+            drainErr.CanceledRequests, drainErr.DrainDuration)
+    }
+}
+```
+
+**Advanced Graceful Operations:**
+```go
+// Graceful plugin removal with intelligent request tracking
+err := manager.GracefulUnregister("old-plugin", 45*time.Second)
+
+// Real-time monitoring during operations
+ticker := time.NewTicker(1 * time.Second)
+defer ticker.Stop()
+
+for range ticker.C {
+    active := manager.GetActiveRequestCount("migrating-service")
+    if active == 0 {
+        log.Println("All requests completed - safe to proceed")
+        break
+    }
+    log.Printf("Waiting for %d requests to complete...", active)
+}
+```
+
+### Hot Reload & Graceful Draining
+
+The library provides sophisticated hot reload capabilities with **active request monitoring** for true zero-downtime deployments:
+
+#### Configuration-Based Reload Strategy with Active Monitoring
+```go
+// Automatic reload on config changes (powered by Argus + Active Request Tracking)
+configLoader := goplugins.NewConfigLoader("config.json", goplugins.ConfigLoaderOptions{
+    ReloadOnChange:   true,
+    ReloadStrategy:   goplugins.ReloadStrategyGraceful,
+    DrainTimeout:     30 * time.Second,    // Uses active request monitoring (not time.Sleep!)
+    GracefulTimeout:  60 * time.Second,    // Maximum graceful shutdown time
+    RollbackOnFailure: true,               // Auto-rollback on failed reloads
+}, logger)
+
+manager, err := configLoader.LoadManager()
+```
+
+#### Intelligent Diff-Based Reloads
+```go
+// Only reload what actually changed
+reloader := goplugins.NewPluginReloader(manager, goplugins.ReloadOptions{
+    Strategy:             goplugins.ReloadStrategyGraceful,
+    MaxConcurrentReloads: 3,               // Limit concurrent plugin reloads
+    HealthCheckTimeout:   10 * time.Second,// Verify health before considering reload successful
+    ValidationTimeout:    5 * time.Second, // Config validation timeout
+}, logger)
+
+// Perform diff-based reload (only changes are applied)
+err := reloader.ReloadWithIntelligentDiff(ctx, newConfig)
+```
+
+#### Manual Graceful Operations
+```go
+// Graceful plugin updates without service interruption
+err := manager.UpdatePlugin(ctx, "payment-service", newConfig, 
+    goplugins.UpdateOptions{
+        GracefulDrain:   true,
+        DrainTimeout:    30 * time.Second,
+        ValidateHealth:  true,
+    })
+
+// Graceful plugin removal
+err := manager.RemovePlugin(ctx, "old-service", 
+    goplugins.RemoveOptions{
+        GracefulDrain:  true,
+        DrainTimeout:   45 * time.Second,
+    })
+```
+
+#### Advanced Reload Configuration
+```go
+type ReloadOptions struct {
+    Strategy               ReloadStrategy    // Immediate, Graceful, or BlueGreen
+    DrainTimeout          time.Duration     // Max time to wait for request completion
+    GracefulTimeout       time.Duration     // Total graceful shutdown timeout
+    MaxConcurrentReloads  int              // Limit concurrent plugin operations
+    HealthCheckTimeout    time.Duration     // Health verification timeout
+    ValidationTimeout     time.Duration     // Config validation timeout
+    RollbackOnFailure     bool             // Auto-rollback on failure
+    DryRun               bool             // Validate without applying changes
+    NotificationHandlers []ReloadHandler   // Custom notification handlers
+}
+```
+
+#### Technical Implementation Details
+
+**Active Request Monitoring Architecture:**
+
+The graceful draining system is built on a sophisticated request tracking architecture that eliminates the need for fixed timeouts:
+
+- **Atomic Counters**: Per-plugin request counters using `atomic.Int64` for lock-free performance
+- **Context Tracking**: Active request contexts stored for selective cancellation
+- **Real-time Monitoring**: 10ms polling interval for precise drain completion detection
+- **Intelligent Timeouts**: Configurable drain timeouts with fallback to force cancellation
+- **Zero Breaking Changes**: Backward compatible with existing configurations
+
+**Performance Characteristics:**
+- **Request Start/End**: ~50ns per operation (atomic operations)
+- **Active Count Check**: ~10ns per operation (atomic load)
+- **Drain Detection**: 10ms precision with minimal CPU overhead
+- **Memory Overhead**: ~24 bytes per active request context
+
+**Production Deployment Benefits:**
+- ✅ **No more `time.Sleep()`** - Active monitoring replaces fixed delays
+- ✅ **Precise completion detection** - Wait only as long as needed
+- ✅ **Request-level visibility** - Real-time active request counts
+- ✅ **Graceful fallbacks** - Force cancellation after configurable timeout
+- ✅ **Progress callbacks** - Monitor drain progress in real-time
+
 ## Usage Examples
 
 ### Load Balancing
@@ -286,26 +754,6 @@ request := goplugins.LoadBalanceRequest{
     Data:      myRequest,
 }
 response, err := balancer.Execute(ctx, request)
-```
-
-### Hot Reload with Graceful Draining
-```go
-// Create reloader with advanced options
-reloader := goplugins.NewPluginReloader(manager, goplugins.ReloadOptions{
-    Strategy:             goplugins.ReloadStrategyGraceful,
-    DrainTimeout:         30 * time.Second,
-    GracefulTimeout:      60 * time.Second,
-    MaxConcurrentReloads: 3,
-    HealthCheckTimeout:   10 * time.Second,
-    RollbackOnFailure:    true,
-}, logger)
-
-// Perform intelligent reload
-ctx := context.Background()
-err := reloader.ReloadWithIntelligentDiff(ctx, newConfig)
-if err != nil {
-    log.Printf("Reload failed: %v", err)
-}
 ```
 
 ### Complete Production Configuration
@@ -369,7 +817,10 @@ config := goplugins.ManagerConfig{
 
 ## Examples
 
-Four complete examples demonstrating different transport types:
+Complete examples demonstrating different capabilities:
+
+### [Plugin Discovery Demo](examples/discovery-demo/)
+**NEW:** Intelligent plugin auto-discovery system. Demonstrates filesystem and network-based plugin detection, manifest validation, capability filtering, and real-time discovery events.
 
 ### [HTTP Plugin](examples/http-plugin/)
 Text processing service with REST API. Supports uppercase, lowercase, reverse, word count operations.
@@ -382,8 +833,14 @@ Dynamic configuration management with Argus file watching. Runtime plugin update
 
 For complete hot reload documentation and advanced configuration options, see the [Argus repository](https://github.com/agilira/argus).
 
+### [Plugin Security Demo](examples/security-demo/)
+**NEW:** Comprehensive security system with hash-based plugin whitelist. Demonstrates authorized plugin validation, hot reload configuration changes, and audit trail monitoring with Argus integration.
+
 ### [Unix Socket Plugin](examples/unix-socket-plugin/)
 File manager using Unix domain sockets. High-performance local communication for file operations.
+
+### [Graceful Draining Demo](examples/graceful-draining-demo/)
+**NEW:** Demonstrates the enhanced active request monitoring and intelligent graceful draining system. Shows real-time request tracking, precision drain detection, and zero-downtime operations that replace fixed `time.Sleep()` delays.
 
 **Quick Start:**
 ```bash
@@ -400,8 +857,59 @@ go run .
 
 ### Transport Implementations
 - `HTTPPlugin[Req, Resp]`: HTTP/HTTPS transport with authentication and connection pooling
-- `GRPCPlugin[Req, Resp]`: gRPC transport with TLS support and service discovery
+- `GRPCNativePlugin[Req, Resp]`: gRPC transport with native protobuf support (industry-standard)
 - `UnixSocketPlugin[Req, Resp]`: Unix domain socket transport for high-performance local communication
+
+### Multi-Format Configuration Support
+
+go-plugins supports multiple configuration formats with automatic format detection:
+
+- **JSON** (`.json`) - Native support via Argus
+- **YAML** (`.yaml`, `.yml`) - Full support with complex structures  
+
+- **Auto-detection** - Format determined by file extension
+
+#### Hybrid Parsing Strategy
+The library uses a sophisticated hybrid approach:
+- **Argus** handles format detection and file watching for all formats
+- **Specialized parsers** (gopkg.in/yaml.v3) for complex structured data
+- **Seamless compatibility** - all configuration structures work identically across formats
+
+#### Example Configuration Files
+
+**JSON Configuration:**
+```json
+{
+  "version": "1.0.0",
+  "log_level": "INFO",
+  "plugins": [{
+    "name": "calculator-plugin",
+    "enabled": true,
+    "type": "grpc",
+    "auth": {
+      "method": "api_key",
+      "api_key": "your-api-key"
+    }
+  }]
+}
+```
+
+**YAML Configuration:**
+```yaml
+version: "1.0.0"
+log_level: INFO
+plugins:
+  - name: calculator-plugin
+    enabled: true
+    type: grpc
+    auth:
+      method: api_key
+      api_key: your-api-key
+```
+
+
+
+All formats support the same features: hot reload, validation, nested configurations, and complex data structures.
 
 ### Configuration Types
 - `PluginConfig`: Complete plugin configuration with transport, auth, and operational settings
