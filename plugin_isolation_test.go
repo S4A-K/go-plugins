@@ -181,15 +181,10 @@ func TestPluginIsolationManager_BasicIsolation(t *testing.T) {
 		},
 		// Add observability configuration
 		ObservabilityConfig: ObservabilityConfig{
-			MetricsEnabled:     true,
-			MetricsCollector:   NewDefaultMetricsCollector(),
-			MetricsPrefix:      "test_isolation",
-			TracingEnabled:     false,
-			LoggingEnabled:     true,
-			LogLevel:           "debug",
-			HealthMetrics:      true,
-			PerformanceMetrics: true,
-			ErrorMetrics:       true,
+			Level:            ObservabilityStandard,
+			MetricsCollector: NewDefaultMetricsCollector(),
+			MetricsPrefix:    "test_isolation",
+			LogLevel:         "debug",
 		},
 	}
 

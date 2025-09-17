@@ -332,18 +332,12 @@ enhancedConfig := goplugins.EnhancedObservabilityConfig()
 
 // Custom configuration
 customConfig := goplugins.ObservabilityConfig{
-    MetricsEnabled:     true,
-    MetricsCollector:   myCustomCollector,
-    MetricsPrefix:      "myapp_plugins",
-    TracingEnabled:     true,
-    TracingProvider:    myTracingProvider,
-    TracingSampleRate:  0.05, // 5% sampling
-    LoggingEnabled:     true,
-    LogLevel:           "info",
-    StructuredLogging:  true,
-    HealthMetrics:      true,
-    PerformanceMetrics: true,
-    ErrorMetrics:       true,
+    Level:             goplugins.ObservabilityAdvanced,
+    MetricsCollector:  myCustomCollector,
+    MetricsPrefix:     "myapp_plugins",
+    TracingProvider:   myTracingProvider,
+    TracingSampleRate: 0.05, // 5% sampling
+    LogLevel:          "info",
 }
 ```
 
@@ -456,7 +450,7 @@ func (p *PrometheusCollector) IncrementCounter(name string, labels map[string]st
 
 // Use with go-plugins
 config := goplugins.ObservabilityConfig{
-    MetricsEnabled:   true,
+    Level:            goplugins.ObservabilityStandard,
     MetricsCollector: &PrometheusCollector{registry: prometheus.NewRegistry()},
     MetricsPrefix:    "myapp_plugins",
 }

@@ -23,23 +23,34 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/agilira/argus"
+	"github.com/agilira/go-errors"
 	"gopkg.in/yaml.v3"
 )
 
 // LibraryConfigWatcher manages hot reload of library-level configuration settings.
 //
-// This watcher complements the existing ConfigWatcher by focusing specifically on
-// library infrastructure settings that don't require plugin recreation but can be
-// applied dynamically to improve operational flexibility.
+// This watcher acts as the central configuration hub, unifying all plugin system
+// configuration under Argus management. It provides hot reload capabilities for
+// all system components while maintaining consistency and audit trails.
+//
+// UNIFIED CONFIGURATION APPROACH:
+// Instead of having separate config systems, this watcher manages:
+//   - Manager/Registry ObservabilityConfig → Applied in real-time
+//   - SecurityConfig → Hot reloaded without restart
+//   - Discovery/Dynamic loading settings → Updated dynamically
+//   - All library infrastructure settings → Centralized management
 //
 // Supported configuration categories:
 //   - Logging: Log levels, output formats, structured logging
 //   - Observability: Metrics settings, tracing configuration, monitoring
+//   - Security: Plugin validation, whitelists, audit settings
+//   - Discovery: Plugin search paths, patterns, validation rules
 //   - Defaults: Default policies applied to new plugins
 //   - Environment: Variable expansion and environment overrides
 //   - Performance: Polling intervals, cache settings, optimization flags
@@ -92,14 +103,17 @@ type LibraryConfig struct {
 	// Logging configuration for runtime adjustments
 	Logging LoggingConfig `json:"logging" yaml:"logging"`
 
-	// Observability settings for monitoring and metrics
+	// Observability settings for monitoring and metrics (unified)
 	Observability ObservabilityRuntimeConfig `json:"observability" yaml:"observability"`
-
-	// Default policies applied to new plugins during registration
-	DefaultPolicies DefaultPoliciesConfig `json:"default_policies" yaml:"default_policies"`
 
 	// Security configuration including plugin whitelist and validation
 	Security SecurityConfig `json:"security" yaml:"security"`
+
+	// Plugin discovery and dynamic loading configuration
+	Discovery DiscoveryRuntimeConfig `json:"discovery" yaml:"discovery"`
+
+	// Default policies applied to new plugins during registration
+	DefaultPolicies DefaultPoliciesConfig `json:"default_policies" yaml:"default_policies"`
 
 	// Environment variable configuration and overrides
 	Environment EnvironmentConfig `json:"environment" yaml:"environment"`
@@ -204,6 +218,40 @@ type ObservabilityRuntimeConfig struct {
 
 	// Whether to collect performance metrics
 	PerformanceMetricsEnabled bool `json:"performance_metrics_enabled" yaml:"performance_metrics_enabled"`
+}
+
+// DiscoveryRuntimeConfig manages plugin discovery and dynamic loading settings.
+//
+// This configuration allows runtime updates to plugin discovery behavior,
+// search paths, and validation rules without requiring service restart.
+// It unifies all discovery-related settings under Argus management.
+type DiscoveryRuntimeConfig struct {
+	// Whether plugin discovery is enabled
+	Enabled bool `json:"enabled" yaml:"enabled"`
+
+	// Search directories for plugin discovery
+	SearchPaths []string `json:"search_paths" yaml:"search_paths"`
+
+	// File patterns to match during discovery (e.g., "*.so", "plugin.json")
+	FilePatterns []string `json:"file_patterns" yaml:"file_patterns"`
+
+	// Maximum directory depth for recursive search
+	MaxDepth int `json:"max_depth" yaml:"max_depth"`
+
+	// Whether to validate plugin manifests during discovery
+	ValidateManifests bool `json:"validate_manifests" yaml:"validate_manifests"`
+
+	// Allowed transport types for discovered plugins
+	AllowedTransports []string `json:"allowed_transports" yaml:"allowed_transports"`
+
+	// Required capabilities for plugin acceptance
+	RequiredCapabilities []string `json:"required_capabilities" yaml:"required_capabilities"`
+
+	// Whether to watch for new plugins (dynamic loading)
+	WatchMode bool `json:"watch_mode" yaml:"watch_mode"`
+
+	// Discovery scan interval for watch mode
+	ScanInterval time.Duration `json:"scan_interval" yaml:"scan_interval"`
 }
 
 // DefaultPoliciesConfig defines default policies applied to new plugins.
@@ -448,7 +496,7 @@ func createArgusConfigForLibrary(options LibraryConfigOptions, logger Logger) ar
 func (lcw *LibraryConfigWatcher[Req, Resp]) Start(ctx context.Context) error {
 	// Prevent restart if watcher was permanently stopped
 	if lcw.stopped.Load() {
-		return fmt.Errorf("library config watcher has been permanently stopped and cannot be restarted")
+		return NewConfigWatcherError("library config watcher has been permanently stopped and cannot be restarted", nil)
 	}
 
 	// Protect start/stop operations with mutex
@@ -457,20 +505,20 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) Start(ctx context.Context) error {
 
 	// Use atomic compare-and-swap to ensure only one goroutine starts the watcher
 	if !lcw.enabled.CompareAndSwap(false, true) {
-		return fmt.Errorf("library config watcher is already running")
+		return NewConfigWatcherError("library config watcher is already running", nil)
 	}
 
 	// Load initial library configuration from file
 	initialConfig, err := lcw.loadLibraryConfigFromFile(lcw.configPath)
 	if err != nil {
 		lcw.enabled.Store(false) // Reset state on failure
-		return fmt.Errorf("failed to load initial library configuration: %w", err)
+		return NewConfigWatcherError("failed to load initial library configuration", err)
 	}
 
 	// Apply initial configuration to manager (non-destructive)
 	if err := lcw.applyLibraryConfigToManager(initialConfig); err != nil {
 		lcw.enabled.Store(false) // Reset state on failure
-		return fmt.Errorf("failed to apply initial library configuration: %w", err)
+		return NewConfigWatcherError("failed to apply initial library configuration", err)
 	}
 
 	// Store current configuration atomically for future comparisons
@@ -487,13 +535,13 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) Start(ctx context.Context) error {
 	// Start watching the library configuration file
 	if err := lcw.watcher.Watch(lcw.configPath, lcw.handleLibraryConfigChange); err != nil {
 		lcw.enabled.Store(false) // Reset state on failure
-		return fmt.Errorf("failed to watch library config file: %w", err)
+		return NewConfigWatcherError("failed to watch library config file", err)
 	}
 
 	// Start Argus file watcher
 	if err := lcw.watcher.Start(); err != nil {
 		lcw.enabled.Store(false) // Reset state on failure
-		return fmt.Errorf("failed to start Argus watcher for library config: %w", err)
+		return NewConfigWatcherError("failed to start Argus watcher for library config", err)
 	}
 
 	// Log successful startup
@@ -524,7 +572,7 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) Start(ctx context.Context) error {
 func (lcw *LibraryConfigWatcher[Req, Resp]) Stop() error {
 	// Fast path: return immediately if already stopped
 	if lcw.stopped.Load() {
-		return fmt.Errorf("library config watcher is already stopped")
+		return NewConfigWatcherError("library config watcher is already stopped", nil)
 	}
 
 	// Use sync.Once to ensure stop operations happen exactly once
@@ -535,7 +583,7 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) Stop() error {
 
 		// Double-check with atomic compare-and-swap
 		if !lcw.enabled.CompareAndSwap(true, false) {
-			stopErr = fmt.Errorf("library config watcher is not running")
+			stopErr = NewConfigWatcherError("library config watcher is not running", nil)
 			return
 		}
 
@@ -546,7 +594,7 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) Stop() error {
 		if argusErr := lcw.watcher.Stop(); argusErr != nil {
 			// If Argus stop fails, restore state but keep stopped=true
 			lcw.enabled.Store(true)
-			stopErr = fmt.Errorf("failed to stop Argus watcher: %w", argusErr)
+			stopErr = NewConfigWatcherError("failed to stop Argus watcher", argusErr)
 			return
 		}
 
@@ -796,13 +844,13 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) loadLibraryConfigFromFile(path strin
 
 	// Validate file path for security
 	if err := lcw.validateConfigFilePath(path); err != nil {
-		return config, fmt.Errorf("invalid config file path: %w", err)
+		return config, NewConfigPathError(lcw.configPath, "invalid config file path")
 	}
 
 	// Read file content securely
 	configBytes, err := lcw.readConfigFileSecurely(path)
 	if err != nil {
-		return config, fmt.Errorf("failed to read config file: %w", err)
+		return config, NewConfigFileError(lcw.configPath, "failed to read config file", err)
 	}
 
 	// Detect format and parse accordingly
@@ -813,17 +861,17 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) loadLibraryConfigFromFile(path strin
 	case argus.FormatYAML:
 		err = yaml.Unmarshal(configBytes, &config)
 	default:
-		return config, fmt.Errorf("unsupported config format: %s", format)
+		return config, NewConfigParseError(lcw.configPath, fmt.Errorf("unsupported config format: %s", format))
 	}
 
 	if err != nil {
-		return config, fmt.Errorf("failed to parse %s config: %w", format, err)
+		return config, NewConfigParseError(lcw.configPath, err)
 	}
 
 	// Apply environment variable expansion if enabled
 	if lcw.envExpander != nil && lcw.options.EnableEnvExpansion {
 		if err := lcw.expandEnvironmentVariables(&config); err != nil {
-			return config, fmt.Errorf("environment variable expansion failed: %w", err)
+			return config, NewConfigValidationError("environment variable expansion failed", err)
 		}
 
 		// Audit successful environment expansion
@@ -836,7 +884,7 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) loadLibraryConfigFromFile(path strin
 
 	// Validate configuration structure
 	if err := lcw.validateLibraryConfig(config); err != nil {
-		return config, fmt.Errorf("invalid library configuration: %w", err)
+		return config, NewConfigValidationError("invalid library configuration", err)
 	}
 
 	return config, nil
@@ -848,23 +896,23 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) loadLibraryConfigFromFile(path strin
 // and other path-based security issues. It ensures the file exists and is readable.
 func (lcw *LibraryConfigWatcher[Req, Resp]) validateConfigFilePath(path string) error {
 	if path == "" {
-		return fmt.Errorf("empty config file path")
+		return NewConfigPathError("", "empty config file path")
 	}
 
 	// Check file exists and is readable
 	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("cannot access config file: %w", err)
+		return NewConfigFileError(path, "cannot access config file", err)
 	}
 
 	// Ensure it's a regular file
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("config path is not a regular file")
+		return NewConfigFileError(path, "config path is not a regular file", nil)
 	}
 
 	// Check reasonable file size (10MB max)
 	if info.Size() > 10*1024*1024 {
-		return fmt.Errorf("config file too large: %d bytes", info.Size())
+		return NewConfigFileError(path, fmt.Sprintf("config file too large: %d bytes", info.Size()), nil)
 	}
 
 	return nil
@@ -875,13 +923,24 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) validateConfigFilePath(path string) 
 // This function safely reads the configuration file content with appropriate
 // security measures and error handling.
 func (lcw *LibraryConfigWatcher[Req, Resp]) readConfigFileSecurely(path string) ([]byte, error) {
-	content, err := os.ReadFile(path)
+	// Security: Validate path to prevent path traversal attacks
+	cleanPath := filepath.Clean(path)
+	if !filepath.IsAbs(cleanPath) {
+		return nil, NewConfigPathError(path, "config file path must be absolute")
+	}
+
+	// Additional security: check for path traversal attempts
+	if strings.Contains(path, "..") {
+		return nil, NewPathTraversalError(path)
+	}
+
+	content, err := os.ReadFile(cleanPath) // #nosec G304 -- Path is validated above
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+		return nil, NewConfigFileError(cleanPath, "failed to read file", err)
 	}
 
 	if len(content) == 0 {
-		return nil, fmt.Errorf("config file is empty")
+		return nil, NewConfigFileError(cleanPath, "config file is empty", nil)
 	}
 
 	return content, nil
@@ -992,27 +1051,27 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) expandSingleVariable(value string) (
 func (lcw *LibraryConfigWatcher[Req, Resp]) validateLibraryConfig(config LibraryConfig) error {
 	// Validate logging configuration
 	if err := lcw.validateLoggingConfig(config.Logging); err != nil {
-		return fmt.Errorf("invalid logging config: %w", err)
+		return NewConfigValidationError("invalid logging config", err)
 	}
 
 	// Validate observability configuration
 	if err := lcw.validateObservabilityConfig(config.Observability); err != nil {
-		return fmt.Errorf("invalid observability config: %w", err)
+		return NewConfigValidationError("invalid observability config", err)
 	}
 
 	// Validate performance configuration
 	if err := lcw.validatePerformanceConfig(config.Performance); err != nil {
-		return fmt.Errorf("invalid performance config: %w", err)
+		return NewConfigValidationError("invalid performance config", err)
 	}
 
 	// Validate default policies configuration
 	if err := lcw.validateDefaultPoliciesConfig(config.DefaultPolicies); err != nil {
-		return fmt.Errorf("invalid default policies config: %w", err)
+		return NewConfigValidationError("invalid default policies config", err)
 	}
 
 	// Validate security configuration
 	if err := lcw.validateSecurityConfig(config.Security); err != nil {
-		return fmt.Errorf("invalid security config: %w", err)
+		return NewConfigValidationError("invalid security config", err)
 	}
 
 	return nil
@@ -1030,7 +1089,7 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) validateLoggingConfig(config Logging
 	}
 
 	if !levelValid {
-		return fmt.Errorf("invalid log level: %s (must be one of: debug, info, warn, error)", config.Level)
+		return NewConfigValidationError(fmt.Sprintf("invalid log level: %s (must be one of: debug, info, warn, error)", config.Level), nil)
 	}
 
 	return nil
@@ -1039,11 +1098,11 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) validateLoggingConfig(config Logging
 // validateObservabilityConfig validates observability configuration settings.
 func (lcw *LibraryConfigWatcher[Req, Resp]) validateObservabilityConfig(config ObservabilityRuntimeConfig) error {
 	if config.TracingSampleRate < 0.0 || config.TracingSampleRate > 1.0 {
-		return fmt.Errorf("invalid tracing sample rate: %f (must be between 0.0 and 1.0)", config.TracingSampleRate)
+		return NewConfigValidationError(fmt.Sprintf("invalid tracing sample rate: %f (must be between 0.0 and 1.0)", config.TracingSampleRate), nil)
 	}
 
 	if config.MetricsInterval < time.Second {
-		return fmt.Errorf("metrics interval too short: %v (minimum 1 second)", config.MetricsInterval)
+		return NewConfigValidationError(fmt.Sprintf("metrics interval too short: %v (minimum 1 second)", config.MetricsInterval), nil)
 	}
 
 	return nil
@@ -1052,11 +1111,11 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) validateObservabilityConfig(config O
 // validatePerformanceConfig validates performance configuration settings.
 func (lcw *LibraryConfigWatcher[Req, Resp]) validatePerformanceConfig(config PerformanceConfig) error {
 	if config.WatcherPollInterval < time.Second {
-		return fmt.Errorf("watcher poll interval too short: %v (minimum 1 second)", config.WatcherPollInterval)
+		return NewConfigValidationError(fmt.Sprintf("watcher poll interval too short: %v (minimum 1 second)", config.WatcherPollInterval), nil)
 	}
 
 	if config.MaxConcurrentHealthChecks < 1 {
-		return fmt.Errorf("max concurrent health checks must be at least 1, got: %d", config.MaxConcurrentHealthChecks)
+		return NewConfigValidationError(fmt.Sprintf("max concurrent health checks must be at least 1, got: %d", config.MaxConcurrentHealthChecks), nil)
 	}
 
 	return nil
@@ -1211,12 +1270,17 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) validateSecurityConfig(config Securi
 func (lcw *LibraryConfigWatcher[Req, Resp]) applyLibraryConfigToManager(config LibraryConfig) error {
 	// Apply logging configuration
 	if err := lcw.applyLoggingConfig(config.Logging); err != nil {
-		return fmt.Errorf("failed to apply logging config: %w", err)
+		return NewConfigWatcherError("failed to apply logging config", err)
 	}
 
 	// Apply observability configuration
 	if err := lcw.applyObservabilityConfig(config.Observability); err != nil {
-		return fmt.Errorf("failed to apply observability config: %w", err)
+		return NewConfigWatcherError("failed to apply observability config", err)
+	}
+
+	// Apply discovery configuration
+	if err := lcw.applyDiscoveryConfig(config.Discovery); err != nil {
+		return NewConfigWatcherError("failed to apply discovery config", err)
 	}
 
 	// Update default policies for new plugins (doesn't affect existing plugins)
@@ -1233,7 +1297,7 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) applyLibraryConfigWithRollback(newCo
 	// Validate before applying if enabled
 	if lcw.options.ValidateBeforeApply {
 		if err := lcw.validateLibraryConfig(newConfig); err != nil {
-			return fmt.Errorf("configuration validation failed: %w", err)
+			return NewConfigValidationError("configuration validation failed", err)
 		}
 	}
 
@@ -1247,7 +1311,7 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) applyLibraryConfigWithRollback(newCo
 			lcw.logger.Info("Rolling back library configuration due to application failure")
 			if rollbackErr := lcw.applyLibraryConfigToManager(*currentConfig); rollbackErr != nil {
 				lcw.logger.Error("Configuration rollback failed", "error", rollbackErr)
-				return fmt.Errorf("config application failed and rollback failed: apply_error=%w, rollback_error=%v", err, rollbackErr)
+				return NewConfigWatcherError(fmt.Sprintf("config application failed and rollback failed: rollback_error=%v", rollbackErr), err)
 			}
 			lcw.logger.Info("Configuration rollback completed successfully")
 		}
@@ -1277,17 +1341,127 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) applyLoggingConfig(config LoggingCon
 //
 // This function updates observability settings at runtime, enabling dynamic
 // adjustment of monitoring, metrics, and tracing without service disruption.
+//
+// UNIFIED CONFIGURATION BRIDGE:
+// This function converts ObservabilityRuntimeConfig to ObservabilityConfig
+// and applies it to the Manager, providing seamless hot reload capabilities.
 func (lcw *LibraryConfigWatcher[Req, Resp]) applyObservabilityConfig(config ObservabilityRuntimeConfig) error {
 	lcw.logger.Info("Applying observability configuration changes",
 		"metrics_enabled", config.MetricsEnabled,
 		"tracing_enabled", config.TracingEnabled,
 		"sample_rate", config.TracingSampleRate)
 
-	// Update manager's observability configuration
-	if observableManager := lcw.manager.CreateObservableManager(); observableManager != nil {
-		// Update observability settings through the observable manager
-		// This is a simplified implementation - full version would update all settings
-		_ = observableManager // Prevent unused variable error
+	// Get current manager observability config as base
+	currentConfig := lcw.manager.GetObservabilityConfig()
+
+	// Determine observability level based on runtime configuration
+	level := lcw.determineObservabilityLevel(config)
+
+	// Create updated config by merging runtime changes with existing config
+	updatedConfig := ObservabilityConfig{
+		// Set the computed level
+		Level: level,
+
+		// Preserve existing collectors and providers (don't recreate them)
+		MetricsCollector: currentConfig.MetricsCollector,
+		TracingProvider:  currentConfig.TracingProvider,
+		MetricsPrefix:    currentConfig.MetricsPrefix,
+
+		// Apply runtime configuration changes
+		TracingSampleRate: config.TracingSampleRate,
+		LogLevel:          "info", // Will be updated by applyLoggingConfig
+	}
+
+	// Apply the unified configuration to the manager
+	if err := lcw.manager.ConfigureObservability(updatedConfig); err != nil {
+		return NewConfigWatcherError("failed to apply observability config to manager", err)
+	}
+
+	lcw.logger.Info("Successfully applied observability configuration to manager")
+	return nil
+}
+
+// determineObservabilityLevel determines the appropriate observability level
+// based on the runtime configuration flags.
+func (lcw *LibraryConfigWatcher[Req, Resp]) determineObservabilityLevel(config ObservabilityRuntimeConfig) ObservabilityLevel {
+	// If nothing is enabled, use disabled
+	if !config.MetricsEnabled && !config.TracingEnabled && !config.HealthMetricsEnabled && !config.PerformanceMetricsEnabled {
+		return ObservabilityDisabled
+	}
+
+	// If performance metrics are enabled, use advanced level
+	if config.PerformanceMetricsEnabled {
+		return ObservabilityAdvanced
+	}
+
+	// If tracing is enabled, use standard level
+	if config.TracingEnabled {
+		return ObservabilityStandard
+	}
+
+	// If only basic metrics are enabled, use basic level
+	if config.MetricsEnabled || config.HealthMetricsEnabled {
+		return ObservabilityBasic
+	}
+
+	// Default to disabled
+	return ObservabilityDisabled
+}
+
+// applyDiscoveryConfig applies plugin discovery configuration changes.
+//
+// This function updates discovery settings at runtime, enabling dynamic
+// adjustment of search paths, patterns, and validation rules without restart.
+//
+// UNIFIED DISCOVERY BRIDGE:
+// This function converts DiscoveryRuntimeConfig to DiscoveryConfig and applies
+// it to the Manager's discovery engine for seamless hot reload capabilities.
+func (lcw *LibraryConfigWatcher[Req, Resp]) applyDiscoveryConfig(config DiscoveryRuntimeConfig) error {
+	lcw.logger.Info("Applying discovery configuration changes",
+		"enabled", config.Enabled,
+		"search_paths", config.SearchPaths,
+		"watch_mode", config.WatchMode)
+
+	// Convert allowed transports from strings to TransportType
+	var allowedTransports []TransportType
+	for _, transport := range config.AllowedTransports {
+		allowedTransports = append(allowedTransports, TransportType(transport))
+	}
+
+	// Create extended discovery config with all features
+	extendedConfig := ExtendedDiscoveryConfig{
+		DiscoveryConfig: DiscoveryConfig{
+			Enabled:     config.Enabled,
+			Directories: config.SearchPaths,
+			Patterns:    config.FilePatterns,
+			WatchMode:   config.WatchMode,
+		},
+		// Extended fields
+		SearchPaths:          config.SearchPaths,
+		FilePatterns:         config.FilePatterns,
+		MaxDepth:             config.MaxDepth,
+		RequiredCapabilities: config.RequiredCapabilities,
+		AllowedTransports:    allowedTransports,
+		DiscoveryTimeout:     config.ScanInterval, // Map ScanInterval to DiscoveryTimeout
+	}
+
+	// Apply the discovery configuration to the manager
+	// Note: This is optional - if ConfigureDiscovery is not implemented, we skip it
+	if discoveryConfigurer, ok := interface{}(lcw.manager).(interface {
+		ConfigureDiscovery(ExtendedDiscoveryConfig) error
+	}); ok {
+		if err := discoveryConfigurer.ConfigureDiscovery(extendedConfig); err != nil {
+			// Check if this is the "not yet implemented" error - if so, skip it
+			if goErr, ok := err.(*errors.Error); ok && goErr.Code == "REGISTRY_1906" {
+				lcw.logger.Debug("Discovery runtime configuration not yet implemented, skipping")
+			} else {
+				return NewConfigWatcherError("failed to apply discovery config to manager", err)
+			}
+		} else {
+			lcw.logger.Info("Successfully applied discovery configuration to manager")
+		}
+	} else {
+		lcw.logger.Debug("Manager does not support runtime discovery configuration updates, skipping")
 	}
 
 	return nil

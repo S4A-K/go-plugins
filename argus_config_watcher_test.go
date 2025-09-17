@@ -273,7 +273,9 @@ func TestLibraryConfigWatcher_HotReload(t *testing.T) {
 	if err := watcher.Start(ctx); err != nil {
 		t.Fatalf("Failed to start watcher: %v", err)
 	}
-	defer watcher.Stop()
+	defer func() {
+		_ = watcher.Stop()
+	}()
 
 	// Wait for initial load
 	time.Sleep(200 * time.Millisecond)
@@ -566,8 +568,12 @@ func TestLibraryConfigWatcher_EnvironmentExpansion(t *testing.T) {
 	}
 
 	for key, value := range testEnvVars {
-		os.Setenv(key, value)
-		defer os.Unsetenv(key)
+		if err := os.Setenv(key, value); err != nil {
+			t.Fatalf("Failed to set %s: %v", key, err)
+		}
+		defer func(k string) {
+			_ = os.Unsetenv(k)
+		}(key)
 	}
 
 	// Create configuration with environment variables
@@ -659,7 +665,16 @@ func TestLibraryConfigWatcher_EnvironmentExpansion(t *testing.T) {
 // createTestManager creates a test plugin manager for testing.
 func createTestManager() *Manager[TestRequest, TestResponse] {
 	logger := createTestLogger()
-	return NewManager[TestRequest, TestResponse](logger)
+	manager := NewManager[TestRequest, TestResponse](logger)
+
+	// Configure basic observability for tests
+	obsConfig := DefaultObservabilityConfig()
+	if err := manager.ConfigureObservability(obsConfig); err != nil {
+		// For tests, we can ignore observability config errors
+		logger.Debug("Failed to configure observability in test manager", "error", err)
+	}
+
+	return manager
 }
 
 // createTestLogger creates a test logger that captures log output.

@@ -88,7 +88,7 @@ func TestGRPCNativePluginCreation(t *testing.T) {
 
 // TestGRPCNativePluginFactory tests the factory pattern
 func TestGRPCNativePluginFactory(t *testing.T) {
-	factory := NewGRPCNativePluginFactory[*MockProtobufRequest, *MockProtobufResponse](nil)
+	factory := NewGRPCPluginFactory[*MockProtobufRequest, *MockProtobufResponse](nil)
 
 	// Test supported transports
 	transports := factory.SupportedTransports()

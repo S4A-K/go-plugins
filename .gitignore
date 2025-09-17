@@ -97,3 +97,4 @@ config.local.*
 *.local.yaml
 *.local.yml
 *.local.json
+backup_rpc/

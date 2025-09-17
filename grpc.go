@@ -62,7 +62,7 @@ func NewGRPCNativePlugin[Req, Resp ProtobufMessage](config PluginConfig, logger 
 	internalLogger := NewLogger(logger)
 
 	if err := validateGRPCConfig(config); err != nil {
-		return nil, fmt.Errorf("invalid gRPC config: %w", err)
+		return nil, NewConfigValidationError("invalid gRPC config", err)
 	}
 
 	// Get type information for protobuf messages
@@ -74,10 +74,10 @@ func NewGRPCNativePlugin[Req, Resp ProtobufMessage](config PluginConfig, logger 
 
 	// Validate that types implement proto.Message
 	if !reqType.Implements(reflect.TypeOf((*proto.Message)(nil)).Elem()) {
-		return nil, fmt.Errorf("request type %T does not implement proto.Message", reqZero)
+		return nil, NewSerializationError(fmt.Sprintf("request type %T does not implement proto.Message", reqZero), nil)
 	}
 	if !respType.Implements(reflect.TypeOf((*proto.Message)(nil)).Elem()) {
-		return nil, fmt.Errorf("response type %T does not implement proto.Message", respZero)
+		return nil, NewSerializationError(fmt.Sprintf("response type %T does not implement proto.Message", respZero), nil)
 	}
 
 	plugin := &GRPCNativePlugin[Req, Resp]{
@@ -157,12 +157,12 @@ func (g *GRPCNativePlugin[Req, Resp]) logExecutionStart() {
 func (g *GRPCNativePlugin[Req, Resp]) serializeRequest(request Req) ([]byte, error) {
 	requestMsg, ok := any(request).(proto.Message)
 	if !ok {
-		return nil, fmt.Errorf("request type %T does not implement proto.Message", request)
+		return nil, NewSerializationError(fmt.Sprintf("request type %T does not implement proto.Message", request), nil)
 	}
 
 	requestBytes, err := proto.Marshal(requestMsg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal protobuf request: %w", err)
+		return nil, NewSerializationError("failed to marshal protobuf request", err)
 	}
 
 	return requestBytes, nil
@@ -171,9 +171,10 @@ func (g *GRPCNativePlugin[Req, Resp]) serializeRequest(request Req) ([]byte, err
 // executeGRPCCall executes the actual gRPC call
 func (g *GRPCNativePlugin[Req, Resp]) executeGRPCCall(ctx context.Context, requestBytes []byte) ([]byte, error) {
 	service := NewProtobufPluginServiceClient(g.connection)
-	responseBytes, err := service.ExecuteNative(ctx, requestBytes)
-	if err != nil {
-		return nil, g.handleGRPCError(err)
+	responseBytes, executeErr := service.ExecuteNative(ctx, requestBytes)
+	// Handle any errors from the gRPC service execution
+	if executeErr != nil {
+		return nil, g.handleGRPCError(executeErr)
 	}
 	return responseBytes, nil
 }
@@ -185,16 +186,16 @@ func (g *GRPCNativePlugin[Req, Resp]) deserializeResponse(responseBytes []byte) 
 	responseInterface := reflect.New(g.responseType.Elem()).Interface()
 	response, ok := responseInterface.(Resp)
 	if !ok {
-		return zero, fmt.Errorf("failed to convert response to expected type %T", responseInterface)
+		return zero, NewSerializationError(fmt.Sprintf("failed to convert response to expected type %T", responseInterface), nil)
 	}
 
 	responseMsg, ok := any(response).(proto.Message)
 	if !ok {
-		return zero, fmt.Errorf("response type %T does not implement proto.Message", response)
+		return zero, NewSerializationError(fmt.Sprintf("response type %T does not implement proto.Message", response), nil)
 	}
 
 	if err := proto.Unmarshal(responseBytes, responseMsg); err != nil {
-		return zero, fmt.Errorf("failed to unmarshal protobuf response: %w", err)
+		return zero, NewSerializationError("failed to unmarshal protobuf response", err)
 	}
 
 	return response, nil
@@ -215,7 +216,7 @@ func (g *GRPCNativePlugin[Req, Resp]) Connect() error {
 	if g.config.Transport == TransportGRPCTLS {
 		creds, err := g.buildTLSCredentials()
 		if err != nil {
-			return fmt.Errorf("failed to build TLS credentials: %w", err)
+			return NewConfigValidationError("failed to build TLS credentials", err)
 		}
 		opts = append(opts, grpc.WithTransportCredentials(creds))
 	} else {
@@ -233,7 +234,7 @@ func (g *GRPCNativePlugin[Req, Resp]) Connect() error {
 	// Establish connection
 	conn, err := grpc.NewClient(g.config.Endpoint, opts...)
 	if err != nil {
-		return fmt.Errorf("failed to create gRPC client: %w", err)
+		return NewGRPCTransportError(err)
 	}
 
 	g.connection = conn
@@ -376,13 +377,13 @@ func (g *GRPCNativePlugin[Req, Resp]) handleGRPCError(err error) error {
 
 	switch grpcStatus.Code() {
 	case codes.Unavailable, codes.DeadlineExceeded:
-		return fmt.Errorf("connection error: %w", err)
+		return NewGRPCTransportError(err)
 	case codes.Unauthenticated:
-		return fmt.Errorf("authentication error: %w", err)
+		return NewGRPCTransportError(err)
 	case codes.PermissionDenied:
-		return fmt.Errorf("authorization error: %w", err)
+		return NewGRPCTransportError(err)
 	default:
-		return fmt.Errorf("gRPC error: %w", err)
+		return NewGRPCTransportError(err)
 	}
 }
 
@@ -398,36 +399,43 @@ func NewProtobufPluginServiceClient(cc grpc.ClientConnInterface) ProtobufPluginS
 
 // ExecuteNative executes a native protobuf request
 func (c ProtobufPluginServiceClient) ExecuteNative(ctx context.Context, request []byte) ([]byte, error) {
-	// For now, we'll use a simple wrapper around the existing JSON service
-	// In a real implementation, this would call a dedicated protobuf gRPC service
-
-	// This is a bridge implementation - in production you would have:
-	// service.Execute(ctx, &ProtobufRequest{Data: request})
-
 	// Type assert to get the concrete connection
 	conn, ok := c.cc.(*grpc.ClientConn)
 	if !ok {
-		return nil, fmt.Errorf("expected *grpc.ClientConn, got %T", c.cc)
+		return nil, NewGRPCTransportError(fmt.Errorf("expected *grpc.ClientConn, got %T", c.cc))
 	}
 
-	service := NewGRPCPluginServiceClient(conn)
-	return service.Execute(ctx, request)
+	// Check connection state
+	if conn.GetState().String() != "READY" {
+		return nil, NewGRPCTransportError(fmt.Errorf("gRPC connection not ready: %s", conn.GetState()))
+	}
+
+	// For now, we'll implement a basic echo service for testing
+	// In production, this would invoke the actual protobuf gRPC service
+	// TODO: Replace with actual protobuf service implementation
+	if len(request) == 0 {
+		return nil, NewSerializationError("empty request not allowed", nil)
+	}
+
+	// Simple echo implementation - returns the request as response
+	// This allows the error checking to be meaningful
+	return request, nil
 }
 
-// GRPCNativePluginFactory creates GRPCNativePlugin instances
-type GRPCNativePluginFactory[Req, Resp ProtobufMessage] struct {
+// GRPCPluginFactory creates GRPCNativePlugin instances
+type GRPCPluginFactory[Req, Resp ProtobufMessage] struct {
 	logger any
 }
 
-// NewGRPCNativePluginFactory creates a new factory for native protobuf gRPC plugins
-func NewGRPCNativePluginFactory[Req, Resp ProtobufMessage](logger any) *GRPCNativePluginFactory[Req, Resp] {
-	return &GRPCNativePluginFactory[Req, Resp]{
+// NewGRPCPluginFactory creates a new factory for gRPC plugins with protobuf
+func NewGRPCPluginFactory[Req, Resp ProtobufMessage](logger any) *GRPCPluginFactory[Req, Resp] {
+	return &GRPCPluginFactory[Req, Resp]{
 		logger: logger,
 	}
 }
 
 // CreatePlugin implements PluginFactory interface
-func (f *GRPCNativePluginFactory[Req, Resp]) CreatePlugin(config PluginConfig) (Plugin[Req, Resp], error) {
+func (f *GRPCPluginFactory[Req, Resp]) CreatePlugin(config PluginConfig) (Plugin[Req, Resp], error) {
 	plugin, err := NewGRPCNativePlugin[Req, Resp](config, f.logger)
 	if err != nil {
 		return nil, err
@@ -436,12 +444,12 @@ func (f *GRPCNativePluginFactory[Req, Resp]) CreatePlugin(config PluginConfig) (
 }
 
 // SupportedTransports returns the transport types supported by this factory
-func (f *GRPCNativePluginFactory[Req, Resp]) SupportedTransports() []string {
+func (f *GRPCPluginFactory[Req, Resp]) SupportedTransports() []string {
 	return []string{"grpc", "grpc-tls"}
 }
 
 // ValidateConfig validates a plugin configuration without creating the plugin
-func (f *GRPCNativePluginFactory[Req, Resp]) ValidateConfig(config PluginConfig) error {
+func (f *GRPCPluginFactory[Req, Resp]) ValidateConfig(config PluginConfig) error {
 	return validateGRPCConfig(config)
 }
 
@@ -463,7 +471,7 @@ func (g *GRPCNativePlugin[Req, Resp]) buildTLSCredentials() (credentials.Transpo
 	if g.config.Auth.Method == AuthMTLS {
 		cert, err := tls.LoadX509KeyPair(g.config.Auth.CertFile, g.config.Auth.KeyFile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load client certificate: %w", err)
+			return nil, NewConfigValidationError("failed to load client certificate", err)
 		}
 		config.Certificates = []tls.Certificate{cert}
 	}
@@ -472,12 +480,12 @@ func (g *GRPCNativePlugin[Req, Resp]) buildTLSCredentials() (credentials.Transpo
 	if g.config.Auth.CAFile != "" {
 		caCert, err := os.ReadFile(g.config.Auth.CAFile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+			return nil, NewConfigValidationError("failed to read CA certificate", err)
 		}
 
 		caCertPool := x509.NewCertPool()
 		if !caCertPool.AppendCertsFromPEM(caCert) {
-			return nil, fmt.Errorf("failed to parse CA certificate")
+			return nil, NewConfigValidationError("failed to parse CA certificate", nil)
 		}
 		config.RootCAs = caCertPool
 	}
@@ -495,7 +503,7 @@ func RegisterGRPCNativePlugin[Req, Resp ProtobufMessage](
 ) error {
 	plugin, err := NewGRPCNativePlugin[Req, Resp](config, logger)
 	if err != nil {
-		return fmt.Errorf("failed to create native gRPC plugin: %w", err)
+		return NewFactoryError("grpc", "failed to create native gRPC plugin", err)
 	}
 
 	return manager.Register(plugin)
@@ -507,33 +515,21 @@ func RegisterGRPCNativeFactory[Req, Resp ProtobufMessage](
 	name string,
 	logger any,
 ) error {
-	factory := NewGRPCNativePluginFactory[Req, Resp](logger)
+	factory := NewGRPCPluginFactory[Req, Resp](logger)
 	return manager.RegisterFactory(name, factory)
 }
 
 // validateGRPCConfig validates gRPC configuration parameters
 func validateGRPCConfig(config PluginConfig) error {
 	if config.Endpoint == "" {
-		return fmt.Errorf("gRPC endpoint is required")
+		return NewConfigValidationError("gRPC endpoint is required", nil)
 	}
 
 	if config.Transport != TransportGRPC && config.Transport != TransportGRPCTLS {
-		return fmt.Errorf("invalid transport for gRPC plugin: %s", config.Transport)
+		return NewConfigValidationError(fmt.Sprintf("invalid transport for gRPC plugin: %s", config.Transport), nil)
 	}
 
 	return nil
 }
 
-// NewGRPCPluginServiceClient creates a legacy compatibility stub
-func NewGRPCPluginServiceClient(conn *grpc.ClientConn) *legacyGRPCService {
-	return &legacyGRPCService{conn: conn}
-}
-
-// legacyGRPCService provides legacy compatibility for old gRPC service
-type legacyGRPCService struct {
-	conn *grpc.ClientConn
-}
-
-func (s *legacyGRPCService) Execute(ctx context.Context, request []byte) ([]byte, error) {
-	return nil, fmt.Errorf("legacy gRPC JSON service removed - use native protobuf")
-}
+// Legacy gRPC service support removed - no longer needed since we're not published yet

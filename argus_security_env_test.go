@@ -2,19 +2,32 @@ package goplugins
 
 import (
 	"os"
+	"runtime"
 	"testing"
 )
 
 func TestLoadSecurityConfigFromEnv(t *testing.T) {
 	// Set test environment variables
-	os.Setenv("GOPLUGINS_SECURITY_ENABLED", "true")
-	os.Setenv("GOPLUGINS_SECURITY_POLICY", "strict")
-	os.Setenv("GOPLUGINS_WHITELIST_FILE", "/tmp/test.json")
+	if err := os.Setenv("GOPLUGINS_SECURITY_ENABLED", "true"); err != nil {
+		t.Fatalf("Failed to set GOPLUGINS_SECURITY_ENABLED: %v", err)
+	}
+	if err := os.Setenv("GOPLUGINS_SECURITY_POLICY", "strict"); err != nil {
+		t.Fatalf("Failed to set GOPLUGINS_SECURITY_POLICY: %v", err)
+	}
+
+	// Use platform-appropriate path
+	whitelistPath := "/tmp/test.json"
+	if runtime.GOOS == "windows" {
+		whitelistPath = "C:\\temp\\test.json"
+	}
+	if err := os.Setenv("GOPLUGINS_WHITELIST_FILE", whitelistPath); err != nil {
+		t.Fatalf("Failed to set GOPLUGINS_WHITELIST_FILE: %v", err)
+	}
 
 	defer func() {
-		os.Unsetenv("GOPLUGINS_SECURITY_ENABLED")
-		os.Unsetenv("GOPLUGINS_SECURITY_POLICY")
-		os.Unsetenv("GOPLUGINS_WHITELIST_FILE")
+		_ = os.Unsetenv("GOPLUGINS_SECURITY_ENABLED")
+		_ = os.Unsetenv("GOPLUGINS_SECURITY_POLICY")
+		_ = os.Unsetenv("GOPLUGINS_WHITELIST_FILE")
 	}()
 
 	// Test loading from environment
@@ -32,8 +45,8 @@ func TestLoadSecurityConfigFromEnv(t *testing.T) {
 		t.Errorf("Expected Policy=SecurityPolicyStrict, got %v", config.Policy)
 	}
 
-	if config.WhitelistFile != "/tmp/test.json" {
-		t.Errorf("Expected WhitelistFile='/tmp/test.json', got %s", config.WhitelistFile)
+	if config.WhitelistFile != whitelistPath {
+		t.Errorf("Expected WhitelistFile='%s', got %s", whitelistPath, config.WhitelistFile)
 	}
 }
 

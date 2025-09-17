@@ -56,8 +56,12 @@ func TestExpandEnvironmentVariables_BasicExpansion(t *testing.T) {
 
 	// Set environment variables
 	for key, value := range testEnvVars {
-		os.Setenv(key, value)
-		defer os.Unsetenv(key)
+		if err := os.Setenv(key, value); err != nil {
+			t.Fatalf("Failed to set %s: %v", key, err)
+		}
+		defer func(k string) {
+			_ = os.Unsetenv(k)
+		}(key)
 	}
 
 	// Create options for expansion
@@ -165,8 +169,12 @@ func TestExpandEnvironmentVariables_SecurityValidation(t *testing.T) {
 
 	// Set dangerous environment variables for testing
 	for key, value := range dangerousEnvVars {
-		os.Setenv(key, value)
-		defer os.Unsetenv(key)
+		if err := os.Setenv(key, value); err != nil {
+			t.Fatalf("Failed to set %s: %v", key, err)
+		}
+		defer func(k string) {
+			_ = os.Unsetenv(k)
+		}(key)
 	}
 
 	// Create options with security validation enabled
@@ -265,8 +273,12 @@ func TestProcessConfigurationWithEnv(t *testing.T) {
 	}
 
 	for key, value := range testEnvVars {
-		os.Setenv(key, value)
-		defer os.Unsetenv(key)
+		if err := os.Setenv(key, value); err != nil {
+			t.Fatalf("Failed to set %s: %v", key, err)
+		}
+		defer func(k string) {
+			_ = os.Unsetenv(k)
+		}(key)
 	}
 
 	// Create options for processing
@@ -341,8 +353,12 @@ func TestExpandEnvironmentVariables_Performance(t *testing.T) {
 	for i := 0; i < numVars; i++ {
 		key := fmt.Sprintf("PERF_VAR_%d", i)
 		value := fmt.Sprintf("value_%d", i)
-		os.Setenv(key, value)
-		defer os.Unsetenv(key)
+		if err := os.Setenv(key, value); err != nil {
+			t.Fatalf("Failed to set %s: %v", key, err)
+		}
+		defer func(k string) {
+			_ = os.Unsetenv(k)
+		}(key)
 	}
 
 	// Create options for expansion

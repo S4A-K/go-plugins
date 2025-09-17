@@ -81,7 +81,7 @@ func (sai *SecurityArgusIntegration) EnableWatchingWithArgus(whitelistFile, audi
 	defer sai.mutex.Unlock()
 
 	if sai.running {
-		return fmt.Errorf("argus integration already running")
+		return NewSecurityValidationError("argus integration already running", nil)
 	}
 
 	sai.whitelistFile = whitelistFile
@@ -89,12 +89,12 @@ func (sai *SecurityArgusIntegration) EnableWatchingWithArgus(whitelistFile, audi
 
 	// Setup audit logging
 	if err := sai.setupAuditLogging(); err != nil {
-		return fmt.Errorf("failed to setup audit logging: %w", err)
+		return NewAuditError("failed to setup audit logging", err)
 	}
 
 	// Setup file watching
 	if err := sai.setupFileWatching(); err != nil {
-		return fmt.Errorf("failed to setup file watching: %w", err)
+		return NewConfigWatcherError("failed to setup file watching", err)
 	}
 
 	sai.running = true
@@ -117,7 +117,7 @@ func (sai *SecurityArgusIntegration) DisableWatching() error {
 	defer sai.mutex.Unlock()
 
 	if !sai.running {
-		return fmt.Errorf("argus integration not running")
+		return NewSecurityValidationError("argus integration not running", nil)
 	}
 
 	// Cancel context to stop all operations
@@ -144,7 +144,7 @@ func (sai *SecurityArgusIntegration) setupAuditLogging() error {
 	// Ensure audit directory exists
 	auditDir := filepath.Dir(sai.auditFile)
 	if err := os.MkdirAll(auditDir, 0750); err != nil {
-		return fmt.Errorf("failed to create audit directory: %w", err)
+		return NewAuditError("failed to create audit directory", err)
 	}
 
 	auditConfig := argus.AuditConfig{
@@ -158,7 +158,7 @@ func (sai *SecurityArgusIntegration) setupAuditLogging() error {
 
 	auditor, err := argus.NewAuditLogger(auditConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create audit logger: %w", err)
+		return NewAuditError("failed to create audit logger", err)
 	}
 
 	sai.auditLogger = auditor
@@ -169,7 +169,7 @@ func (sai *SecurityArgusIntegration) setupAuditLogging() error {
 // setupFileWatching configures Argus file watching for the whitelist
 func (sai *SecurityArgusIntegration) setupFileWatching() error {
 	if sai.whitelistFile == "" {
-		return fmt.Errorf("whitelist file not specified")
+		return NewConfigValidationError("whitelist file not specified", nil)
 	}
 
 	// Create Argus configuration for optimal performance
@@ -206,7 +206,7 @@ func (sai *SecurityArgusIntegration) setupFileWatching() error {
 	)
 
 	if err != nil {
-		return fmt.Errorf("failed to create Argus watcher: %w", err)
+		return NewConfigWatcherError("failed to create Argus watcher", err)
 	}
 
 	// Store watcher reference
@@ -307,19 +307,19 @@ func (sai *SecurityArgusIntegration) GetWatchedFiles() []string {
 // ValidateWhitelistIntegrity performs integrity check on the whitelist file
 func (sai *SecurityArgusIntegration) ValidateWhitelistIntegrity() error {
 	if sai.whitelistFile == "" {
-		return fmt.Errorf("whitelist file not configured")
+		return NewConfigValidationError("whitelist file not configured", nil)
 	}
 
 	// Check file existence and readability
 	info, err := os.Stat(sai.whitelistFile)
 	if err != nil {
-		return fmt.Errorf("whitelist file not accessible: %w", err)
+		return NewFilePermissionError(sai.whitelistFile, err)
 	}
 
 	// Check file size (prevent extremely large files)
 	maxSize := int64(10 * 1024 * 1024) // 10MB max
 	if info.Size() > maxSize {
-		return fmt.Errorf("whitelist file too large: %d bytes (max %d)", info.Size(), maxSize)
+		return NewConfigFileError(sai.whitelistFile, fmt.Sprintf("whitelist file too large: %d bytes (max %d)", info.Size(), maxSize), nil)
 	}
 
 	// Audit the integrity check
@@ -339,14 +339,14 @@ func (sai *SecurityArgusIntegration) ForceReload() error {
 	defer sai.mutex.Unlock()
 
 	if !sai.running {
-		return fmt.Errorf("argus integration not running")
+		return NewSecurityValidationError("argus integration not running", nil)
 	}
 
 	sai.logger.Info("Forcing whitelist reload", "file", sai.whitelistFile)
 
 	// Validate integrity first
 	if err := sai.ValidateWhitelistIntegrity(); err != nil {
-		return fmt.Errorf("whitelist integrity check failed: %w", err)
+		return NewWhitelistError("whitelist integrity check failed", err)
 	}
 
 	// Reload the whitelist
@@ -358,7 +358,7 @@ func (sai *SecurityArgusIntegration) ForceReload() error {
 			"file":  sai.whitelistFile,
 			"error": err.Error(),
 		})
-		return fmt.Errorf("failed to reload whitelist: %w", err)
+		return NewWhitelistError("failed to reload whitelist", err)
 	}
 
 	// Update statistics
@@ -409,7 +409,7 @@ func (sv *SecurityValidator) ForceReloadWhitelist() error {
 	defer sv.mutex.RUnlock()
 
 	if sv.argusIntegration == nil {
-		return fmt.Errorf("argus integration not initialized")
+		return NewSecurityValidationError("argus integration not initialized", nil)
 	}
 
 	return sv.argusIntegration.ForceReload()

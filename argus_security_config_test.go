@@ -13,6 +13,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,14 @@ func TestLibraryConfigWithSecurityConfig(t *testing.T) {
 	// Create a temporary directory for test files
 	tempDir := t.TempDir()
 	configFile := filepath.Join(tempDir, "unified_config.json")
+
+	// Create platform-appropriate forbidden paths
+	var forbiddenPaths string
+	if runtime.GOOS == "windows" {
+		forbiddenPaths = `["C:\\temp", "C:\\tmp"]`
+	} else {
+		forbiddenPaths = `["/tmp", "/var/tmp"]`
+	}
 
 	// Create minimal valid configuration focusing on SecurityConfig
 	configJSON := `{
@@ -61,16 +70,16 @@ func TestLibraryConfigWithSecurityConfig(t *testing.T) {
 		"security": {
 			"enabled": true,
 			"policy": 2,
-			"whitelist_file": "` + filepath.Join(tempDir, "whitelist.json") + `",
+			"whitelist_file": "` + filepath.ToSlash(filepath.Join(tempDir, "whitelist.json")) + `",
 			"auto_update": true,
 			"hash_algorithm": "sha256",
 			"validate_on_start": true,
 			"max_file_size": 1048576,
 			"allowed_types": [".so", ".dll", ".dylib"],
-			"forbidden_paths": ["/tmp", "/var/tmp"],
+			"forbidden_paths": ` + forbiddenPaths + `,
 			"audit": {
 				"enabled": true,
-				"audit_file": "` + filepath.Join(tempDir, "security.log") + `",
+				"audit_file": "` + filepath.ToSlash(filepath.Join(tempDir, "security.log")) + `",
 				"log_unauthorized": true,
 				"log_authorized": false,
 				"log_config_changes": true
@@ -91,7 +100,7 @@ func TestLibraryConfigWithSecurityConfig(t *testing.T) {
 	}
 
 	// Create a simple manager for testing
-	manager := &Manager[string, string]{}
+	manager := NewManager[string, string](nil)
 
 	// Create library config watcher
 	options := LibraryConfigOptions{
@@ -166,7 +175,7 @@ func TestLibraryConfigWithSecurityConfig(t *testing.T) {
 // TestSecurityConfigValidation tests the validateSecurityConfig function
 func TestSecurityConfigValidation(t *testing.T) {
 	tempDir := t.TempDir()
-	manager := &Manager[string, string]{}
+	manager := NewManager[string, string](nil)
 
 	// Create a watcher for testing (we need it to access the validation method)
 	configFile := filepath.Join(tempDir, "test.json")
@@ -190,20 +199,34 @@ func TestSecurityConfigValidation(t *testing.T) {
 	}{
 		{
 			name: "valid_config",
-			config: SecurityConfig{
-				Enabled:        true,
-				Policy:         SecurityPolicyStrict,
-				WhitelistFile:  "/absolute/path/whitelist.json",
-				HashAlgorithm:  HashAlgorithmSHA256,
-				MaxFileSize:    1024 * 1024,
-				AllowedTypes:   []string{".so", ".dll"},
-				ForbiddenPaths: []string{"/tmp"},
-				AuditConfig: SecurityAuditConfig{
-					Enabled:   true,
-					AuditFile: "/absolute/path/audit.log",
-				},
-				ReloadDelay: 100 * time.Millisecond,
-			},
+			config: func() SecurityConfig {
+				// Use platform-appropriate absolute paths
+				var whitelistPath, auditPath, forbiddenPath string
+				if runtime.GOOS == "windows" {
+					whitelistPath = "C:\\absolute\\path\\whitelist.json"
+					auditPath = "C:\\absolute\\path\\audit.log"
+					forbiddenPath = "C:\\temp"
+				} else {
+					whitelistPath = "/absolute/path/whitelist.json"
+					auditPath = "/absolute/path/audit.log"
+					forbiddenPath = "/tmp"
+				}
+
+				return SecurityConfig{
+					Enabled:        true,
+					Policy:         SecurityPolicyStrict,
+					WhitelistFile:  whitelistPath,
+					HashAlgorithm:  HashAlgorithmSHA256,
+					MaxFileSize:    1024 * 1024,
+					AllowedTypes:   []string{".so", ".dll"},
+					ForbiddenPaths: []string{forbiddenPath},
+					AuditConfig: SecurityAuditConfig{
+						Enabled:   true,
+						AuditFile: auditPath,
+					},
+					ReloadDelay: 100 * time.Millisecond,
+				}
+			}(),
 			expectErr: false,
 		},
 		{
@@ -353,7 +376,7 @@ func TestSecurityConfigHotReload(t *testing.T) {
 	}
 
 	// Create watcher
-	manager := &Manager[string, string]{}
+	manager := NewManager[string, string](nil)
 	options := LibraryConfigOptions{
 		PollInterval:        50 * time.Millisecond,
 		ValidateBeforeApply: true,
@@ -368,7 +391,9 @@ func TestSecurityConfigHotReload(t *testing.T) {
 	if err := watcher.Start(ctx); err != nil {
 		t.Fatalf("Failed to start watcher: %v", err)
 	}
-	defer watcher.Stop()
+	defer func() {
+		_ = watcher.Stop()
+	}()
 
 	// Wait for initial load
 	time.Sleep(200 * time.Millisecond)

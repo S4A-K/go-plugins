@@ -521,7 +521,7 @@ func (gps *GenericPluginServer) handleConnection(ctx context.Context, connID str
 		gps.stats.RequestsHandled++
 		gps.stats.LastRequestTime = time.Now()
 
-		// Echo back (placeholder for actual request processing)
+		// Echo response for testing/demo purposes
 		_, writeErr := conn.Write(buffer[:n])
 		if writeErr != nil {
 			gps.logger.Debug("Connection write error", "error", writeErr, "conn_id", connID)

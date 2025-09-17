@@ -120,7 +120,7 @@ func NewSubprocessPluginFactory[Req, Resp any](logger Logger) *SubprocessPluginF
 // Args can be passed via the PluginConfig.
 func (f *SubprocessPluginFactory[Req, Resp]) CreatePlugin(config PluginConfig) (Plugin[Req, Resp], error) {
 	if config.Endpoint == "" {
-		return nil, fmt.Errorf("executable path cannot be empty for subprocess transport")
+		return nil, NewConfigValidationError("executable path cannot be empty for subprocess transport", nil)
 	}
 
 	// Initialize handshake configuration
@@ -172,16 +172,16 @@ func (f *SubprocessPluginFactory[Req, Resp]) SupportedTransports() []string {
 // ValidateConfig implements PluginFactory interface.
 func (f *SubprocessPluginFactory[Req, Resp]) ValidateConfig(config PluginConfig) error {
 	if config.Endpoint == "" {
-		return fmt.Errorf("executable path cannot be empty for subprocess transport")
+		return NewConfigValidationError("executable path cannot be empty for subprocess transport", nil)
 	}
 
 	if config.Transport != TransportExecutable {
-		return fmt.Errorf("subprocess factory only supports executable transport, got: %s", config.Transport)
+		return NewConfigValidationError(fmt.Sprintf("subprocess factory only supports executable transport, got: %s", config.Transport), nil)
 	}
 
 	// Validate executable path exists and is executable
 	if config.Executable == "" {
-		return fmt.Errorf("executable path is required")
+		return NewConfigValidationError("executable path is required", nil)
 	}
 
 	return nil
@@ -200,20 +200,20 @@ func (sp *SubprocessPlugin[Req, Resp]) Execute(ctx context.Context, execCtx Exec
 	// Start subprocess if not already running
 	if !sp.started {
 		if err := sp.startProcess(ctx); err != nil {
-			return zero, fmt.Errorf("failed to start subprocess: %w", err)
+			return zero, NewProcessError("failed to start subprocess", err)
 		}
 	}
 
 	// Communication infrastructure is ready - requires RPC implementation (Priority 5)
 	if sp.commBridge == nil {
-		return zero, fmt.Errorf("communication bridge not available")
+		return zero, NewCommunicationError("communication bridge not available", nil)
 	}
 
 	sp.logger.Debug("Executing subprocess request",
 		"request_id", execCtx.RequestID,
 		"timeout", execCtx.Timeout)
 
-	return zero, fmt.Errorf("RPC communication protocol not implemented - will be completed in Priority 5")
+	return zero, NewRPCError("RPC communication protocol not implemented - will be completed in Priority 5", nil)
 }
 
 // startProcess launches the subprocess and establishes communication with handshake.
@@ -223,7 +223,7 @@ func (sp *SubprocessPlugin[Req, Resp]) startProcess(ctx context.Context) error {
 	}
 
 	if err := sp.validateExecutablePath(); err != nil {
-		return fmt.Errorf("executable validation failed: %w", err)
+		return NewConfigValidationError("executable validation failed", err)
 	}
 
 	sp.logger.Info("Starting subprocess plugin with handshake", "path", sp.executablePath, "args", sp.args)
@@ -246,7 +246,7 @@ func (sp *SubprocessPlugin[Req, Resp]) startProcess(ctx context.Context) error {
 // setupCommunication initializes the communication bridge and prepares handshake info
 func (sp *SubprocessPlugin[Req, Resp]) setupCommunication() error {
 	if err := sp.commBridge.Start(); err != nil {
-		return fmt.Errorf("failed to start communication bridge: %w", err)
+		return NewCommunicationError("failed to start communication bridge", err)
 	}
 	return nil
 }
@@ -278,20 +278,20 @@ func (sp *SubprocessPlugin[Req, Resp]) setupStreamPipes() error {
 	if sp.streamConfig.SyncStdout {
 		stdoutPipe, err := sp.cmd.StdoutPipe()
 		if err != nil {
-			return fmt.Errorf("failed to create stdout pipe: %w", err)
+			return NewProcessError("failed to create stdout pipe", err)
 		}
 		if err := sp.streamSyncer.AddStream(StreamStdout, stdoutPipe); err != nil {
-			return fmt.Errorf("failed to add stdout stream: %w", err)
+			return NewProcessError("failed to add stdout stream", err)
 		}
 	}
 
 	if sp.streamConfig.SyncStderr {
 		stderrPipe, err := sp.cmd.StderrPipe()
 		if err != nil {
-			return fmt.Errorf("failed to create stderr pipe: %w", err)
+			return NewProcessError("failed to create stderr pipe", err)
 		}
 		if err := sp.streamSyncer.AddStream(StreamStderr, stderrPipe); err != nil {
-			return fmt.Errorf("failed to add stderr stream: %w", err)
+			return NewProcessError("failed to add stderr stream", err)
 		}
 	}
 
@@ -301,12 +301,12 @@ func (sp *SubprocessPlugin[Req, Resp]) setupStreamPipes() error {
 // startProcessAndStreams starts the subprocess and stream synchronization
 func (sp *SubprocessPlugin[Req, Resp]) startProcessAndStreams() error {
 	if err := sp.cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start process: %w", err)
+		return NewProcessError("failed to start process", err)
 	}
 
 	if err := sp.streamSyncer.Start(); err != nil {
 		sp.cleanupOnStartFailure()
-		return fmt.Errorf("failed to start stream synchronization: %w", err)
+		return NewProcessError("failed to start stream synchronization", err)
 	}
 
 	sp.process = &ProcessInfo{
@@ -339,7 +339,7 @@ func (sp *SubprocessPlugin[Req, Resp]) completeHandshakeAndFinalize(ctx context.
 		if stopErr := sp.Stop(ctx); stopErr != nil {
 			sp.logger.Warn("Failed to stop subprocess during handshake cleanup", "error", stopErr)
 		}
-		return fmt.Errorf("handshake failed: %w", err)
+		return NewHandshakeError("handshake failed", err)
 	}
 
 	sp.started = true
@@ -370,7 +370,7 @@ func (sp *SubprocessPlugin[Req, Resp]) waitForHandshake(ctx context.Context) err
 	// and validate the handshake environment we provided
 	select {
 	case <-handshakeCtx.Done():
-		return NewProtocolError("handshake timeout", HandshakeTimeout, handshakeCtx.Err())
+		return NewHandshakeError("handshake timeout", handshakeCtx.Err())
 	case <-time.After(100 * time.Millisecond): // Give time for connection
 		sp.logger.Debug("Handshake completed")
 		return nil
@@ -635,23 +635,23 @@ func parseEnv(config PluginConfig) []string {
 // validateExecutablePath validates the executable path to prevent command injection.
 func (sp *SubprocessPlugin[Req, Resp]) validateExecutablePath() error {
 	if sp.executablePath == "" {
-		return fmt.Errorf("executable path is empty")
+		return NewConfigPathError("", "executable path is empty")
 	}
 
 	// Check if the path contains potentially dangerous characters
 	if strings.Contains(sp.executablePath, "..") {
-		return fmt.Errorf("executable path contains path traversal characters")
+		return NewPathTraversalError("executable path contains path traversal characters")
 	}
 
 	// Ensure the file exists and is executable
 	if _, err := os.Stat(sp.executablePath); err != nil {
-		return fmt.Errorf("executable not found: %w", err)
+		return NewConfigFileError("", "executable not found", err)
 	}
 
 	// Validate arguments for basic injection prevention
 	for _, arg := range sp.args {
 		if strings.Contains(arg, ";") || strings.Contains(arg, "&") || strings.Contains(arg, "|") {
-			return fmt.Errorf("argument contains potentially dangerous characters: %s", arg)
+			return NewConfigValidationError(fmt.Sprintf("argument contains potentially dangerous characters: %s", arg), nil)
 		}
 	}
 

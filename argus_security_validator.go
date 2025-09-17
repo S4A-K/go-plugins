@@ -228,7 +228,7 @@ func NewSecurityValidator(config SecurityConfig, logger Logger) (*SecurityValida
 	// Load initial whitelist if enabled
 	if config.Enabled && config.WhitelistFile != "" {
 		if err := validator.loadWhitelist(); err != nil {
-			return nil, fmt.Errorf("failed to load initial whitelist: %w", err)
+			return nil, NewWhitelistError("failed to load initial whitelist", err)
 		}
 	}
 
@@ -255,7 +255,7 @@ func (sv *SecurityValidator) setupAuditLogging() error {
 
 	auditor, err := argus.NewAuditLogger(auditConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create audit logger: %w", err)
+		return NewAuditError("failed to create audit logger", err)
 	}
 
 	sv.auditLogger = auditor
@@ -269,13 +269,13 @@ func (sv *SecurityValidator) Enable() error {
 	defer sv.mutex.Unlock()
 
 	if sv.enabled {
-		return fmt.Errorf("security validator already enabled")
+		return NewSecurityValidationError("security validator already enabled", nil)
 	}
 
 	// Load whitelist
 	if sv.config.WhitelistFile != "" {
 		if err := sv.loadWhitelist(); err != nil {
-			return fmt.Errorf("failed to load whitelist: %w", err)
+			return NewWhitelistError("failed to load whitelist", err)
 		}
 	}
 
@@ -310,7 +310,7 @@ func (sv *SecurityValidator) Disable() error {
 	defer sv.mutex.Unlock()
 
 	if !sv.enabled {
-		return fmt.Errorf("security validator already disabled")
+		return NewSecurityValidationError("security validator already disabled", nil)
 	}
 
 	// Stop Argus config monitoring
@@ -361,7 +361,7 @@ func (sv *SecurityValidator) ValidatePlugin(pluginConfig PluginConfig, pluginPat
 	// Perform actual validation
 	violations, err := sv.performValidation(pluginConfig, pluginPath)
 	if err != nil {
-		return nil, fmt.Errorf("validation error: %w", err)
+		return nil, NewSecurityValidationError("validation error", err)
 	}
 
 	result.Violations = violations
@@ -424,7 +424,7 @@ func (sv *SecurityValidator) performValidation(pluginConfig PluginConfig, plugin
 	// Validate hash if file path provided
 	if pluginPath != "" {
 		if err := sv.validatePluginHash(pluginPath, whitelistEntry, &violations, timestamp); err != nil {
-			return violations, fmt.Errorf("hash validation error: %w", err)
+			return violations, NewHashValidationError(pluginPath, err)
 		}
 	}
 
@@ -443,14 +443,14 @@ func (sv *SecurityValidator) performValidation(pluginConfig PluginConfig, plugin
 	// Validate file size constraints
 	if pluginPath != "" && (whitelistEntry.MaxFileSize > 0 || sv.config.MaxFileSize > 0) {
 		if err := sv.validateFileSize(pluginPath, whitelistEntry, &violations, timestamp); err != nil {
-			return violations, fmt.Errorf("file size validation error: %w", err)
+			return violations, NewSecurityValidationError("file size validation error", err)
 		}
 	}
 
 	// Validate allowed endpoints
 	if len(whitelistEntry.AllowedEndpoints) > 0 {
 		if err := sv.validateEndpoints(pluginConfig, whitelistEntry, &violations, timestamp); err != nil {
-			return violations, fmt.Errorf("endpoint validation error: %w", err)
+			return violations, NewSecurityValidationError("endpoint validation error", err)
 		}
 	}
 
@@ -462,7 +462,7 @@ func (sv *SecurityValidator) validatePluginHash(pluginPath string, entry PluginH
 	// Calculate actual hash
 	actualHash, err := sv.calculateFileHash(pluginPath)
 	if err != nil {
-		return fmt.Errorf("failed to calculate hash: %w", err)
+		return NewHashValidationError(pluginPath, err)
 	}
 
 	// Compare with expected hash
@@ -489,7 +489,7 @@ func (sv *SecurityValidator) validatePluginHash(pluginPath string, entry PluginH
 func (sv *SecurityValidator) validateFileSize(pluginPath string, entry PluginHashInfo, violations *[]SecurityViolation, timestamp time.Time) error {
 	stat, err := os.Stat(pluginPath)
 	if err != nil {
-		return fmt.Errorf("failed to stat file: %w", err)
+		return NewFilePermissionError(pluginPath, err)
 	}
 
 	fileSize := stat.Size()
@@ -555,12 +555,12 @@ func (sv *SecurityValidator) calculateFileHash(filePath string) (string, error) 
 	// Validate file path to prevent directory traversal attacks
 	cleanPath := filepath.Clean(filePath)
 	if strings.Contains(cleanPath, "..") {
-		return "", fmt.Errorf("invalid file path: %s", filePath)
+		return "", NewConfigPathError(filePath, "invalid file path")
 	}
 
 	file, err := os.Open(cleanPath) // #nosec G304 - path is validated above
 	if err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
+		return "", NewFilePermissionError(filePath, err)
 	}
 	defer func() { _ = file.Close() }() // Ignore close error
 
@@ -568,33 +568,33 @@ func (sv *SecurityValidator) calculateFileHash(filePath string) (string, error) 
 	case HashAlgorithmSHA256:
 		hasher := sha256.New()
 		if _, err := io.Copy(hasher, file); err != nil {
-			return "", fmt.Errorf("failed to hash file: %w", err)
+			return "", NewHashValidationError(filePath, err)
 		}
 		return hex.EncodeToString(hasher.Sum(nil)), nil
 	default:
-		return "", fmt.Errorf("unsupported hash algorithm: %s", sv.config.HashAlgorithm)
+		return "", NewConfigValidationError(fmt.Sprintf("unsupported hash algorithm: %s", sv.config.HashAlgorithm), nil)
 	}
 }
 
 // loadWhitelist loads the plugin whitelist from the configured file
 func (sv *SecurityValidator) loadWhitelist() error {
 	if sv.config.WhitelistFile == "" {
-		return fmt.Errorf("whitelist file path not configured")
+		return NewConfigValidationError("whitelist file path not configured", nil)
 	}
 
 	data, err := os.ReadFile(sv.config.WhitelistFile)
 	if err != nil {
-		return fmt.Errorf("failed to read whitelist file: %w", err)
+		return NewWhitelistError("failed to read whitelist file", err)
 	}
 
 	var whitelist PluginWhitelist
 	if err := json.Unmarshal(data, &whitelist); err != nil {
-		return fmt.Errorf("failed to parse whitelist JSON: %w", err)
+		return NewWhitelistError("failed to parse whitelist JSON", err)
 	}
 
 	// Validate whitelist structure
 	if err := sv.validateWhitelistStructure(&whitelist); err != nil {
-		return fmt.Errorf("invalid whitelist structure: %w", err)
+		return NewWhitelistError("invalid whitelist structure", err)
 	}
 
 	sv.whitelist = &whitelist
@@ -612,7 +612,7 @@ func (sv *SecurityValidator) loadWhitelist() error {
 // validateWhitelistStructure validates the loaded whitelist
 func (sv *SecurityValidator) validateWhitelistStructure(whitelist *PluginWhitelist) error {
 	if whitelist.Plugins == nil {
-		return fmt.Errorf("whitelist must contain plugins map")
+		return NewWhitelistError("whitelist must contain plugins map", nil)
 	}
 
 	if whitelist.HashAlgorithm == "" {

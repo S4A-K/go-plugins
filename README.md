@@ -6,9 +6,9 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/agilira/go-plugins?v=2)](https://goreportcard.com/report/github.com/agilira/go-plugins)
 [![Coverage](https://codecov.io/gh/agilira/orpheus/branch/main/graph/badge.svg)](https://codecov.io/gh/agilira/go-plugins)
 
-go-plugins provides a production-ready, type-safe plugin architecture for Go applications. It supports HTTP and gRPC transport protocols with built-in circuit breaking, health monitoring, authentication, and hot reload powered by [Argus](https://github.com/agilira/argus) (12.10ns/op).
+go-plugins provides a production-ready, type-safe plugin architecture for Go applications. It supports subprocess execution and gRPC transport protocols with built-in circuit breaking, health monitoring, authentication, and hot reload powered by [Argus](https://github.com/agilira/argus) (12.10ns/op).
 
-> **Note**: Unix sockets are deprecated and will be removed in v1.2.0. The library uses RPC/gRPC over TCP for secure and reliable communication.
+> **Note**: The library uses subprocess execution with RPC/gRPC over TCP for secure and reliable plugin communication.
 
 **Roadmap**: Enhanced subprocess execution, bidirectional RPC, and advanced process management features. See [SIMPLIFIED_APPROACH.md](SIMPLIFIED_APPROACH.md) for details.
 
@@ -18,7 +18,7 @@ go-plugins provides a production-ready, type-safe plugin architecture for Go app
 
 ### Core Plugin System
 - **Type Safety**: Generics-based architecture ensuring compile-time type safety for requests and responses  
-- **Multiple Transport Protocols**: HTTP/HTTPS, gRPC (with optional TLS) for secure communication
+- **Multiple Transport Protocols**: Subprocess execution, gRPC (with optional TLS) for secure communication
 - **Multi-Format Configuration**: Native support for JSON, YAML with automatic format detection
 - **Auto-Discovery**: Filesystem-based plugin detection with security focus
 - **Security & Authentication**: API keys, Bearer tokens, Basic auth, mTLS, plugin verification
@@ -78,22 +78,18 @@ func main() {
     manager := goplugins.NewManager[AuthRequest, AuthResponse](logger)
 
     // Register plugin factory
-    httpFactory := goplugins.NewHTTPPluginFactory[AuthRequest, AuthResponse]()
-    manager.RegisterFactory("http", httpFactory)
+    subprocessFactory := goplugins.NewSubprocessPluginFactory[AuthRequest, AuthResponse]()
+    manager.RegisterFactory("subprocess", subprocessFactory)
 
     // Configure plugins
     config := goplugins.ManagerConfig{
         Plugins: []goplugins.PluginConfig{
             {
                 Name:      "auth-service",
-                Type:      "http",
-                Transport: goplugins.TransportHTTPS,
-                Endpoint:  "https://auth.example.com/api/v1/validate",
+                Type:      "subprocess",
+                Transport: goplugins.TransportExecutable,
+                Endpoint:  "./auth-plugin",
                 Enabled:   true,
-                Auth: goplugins.AuthConfig{
-                    Method: goplugins.AuthBearer,
-                    Token:  "your-jwt-token",
-                },
             },
         },
     }
@@ -156,12 +152,12 @@ func (l *MyLogger) With(args ...any) goplugins.Logger { return l }
 
 ### Usage
 
-#### HTTP/HTTPS Plugin Configuration
+#### Subprocess Plugin Configuration
 ```go
 config := goplugins.PluginConfig{
     Name:      "api-service",
-    Transport: goplugins.TransportHTTPS,
-    Endpoint:  "https://api.example.com/v1/process",
+    Transport: goplugins.TransportExecutable,
+    Endpoint:  "./api-plugin",
     Auth: goplugins.AuthConfig{
         Method: goplugins.AuthAPIKey,
         APIKey: "your-api-key",
@@ -178,8 +174,8 @@ config := goplugins.PluginConfig{
 ```go
 config := goplugins.PluginConfig{
     Name:      "grpc-service",
-    Transport: goplugins.TransportGRPCTLS, // DEPRECATED: Use native protobuf instead
-    Endpoint:  "grpc.example.com:443",
+    Transport: goplugins.TransportExecutable, // Use subprocess execution
+    Endpoint:  "/usr/local/bin/grpc-service",
     Auth: goplugins.AuthConfig{
         Method:   goplugins.AuthMTLS,
         CertFile: "/etc/ssl/client.crt",
@@ -189,12 +185,12 @@ config := goplugins.PluginConfig{
 }
 ```
 
-#### Unix Domain Socket Plugin Configuration
+#### Subprocess Plugin Configuration
 ```go
 config := goplugins.PluginConfig{
     Name:      "local-processor",
-    Transport: goplugins.TransportUnix,
-    Endpoint:  "/tmp/processor.sock",
+    Transport: goplugins.TransportExecutable,
+    Endpoint:  "./processor-plugin",
     Connection: goplugins.ConnectionConfig{
         MaxConnections: 20,
     },
@@ -232,7 +228,7 @@ func main() {
         FilePatterns:         []string{"plugin.json", "manifest.yaml"},
         MaxDepth:             3,
         ValidateManifests:    true,
-        AllowedTransports:    []goplugins.TransportType{goplugins.TransportHTTPS, goplugins.TransportGRPC},
+        AllowedTransports:    []goplugins.TransportType{goplugins.TransportExecutable, goplugins.TransportGRPC},
         RequiredCapabilities: []string{"authentication", "logging"},
     }
 
@@ -502,7 +498,7 @@ func (m *MyMetricsCollector) RecordHistogram(name string, labels map[string]stri
 
 // Use your custom collector
 config := goplugins.ObservabilityConfig{
-    MetricsEnabled:   true,
+    Level:            goplugins.ObservabilityStandard,
     MetricsCollector: &MyMetricsCollector{client: myClient},
     MetricsPrefix:    "myapp_plugins",
     // ... other config
@@ -789,9 +785,9 @@ config := goplugins.ManagerConfig{
     Plugins: []goplugins.PluginConfig{
         {
             Name:      "payment-service",
-            Type:      "http",
-            Transport: goplugins.TransportHTTPS,
-            Endpoint:  "https://payments.example.com/api/v1",
+            Type:      "subprocess",
+            Transport: goplugins.TransportExecutable,
+            Endpoint:  "./payment-plugin",
             Priority:  1,
             Enabled:   true,
             
@@ -836,8 +832,8 @@ For complete hot reload documentation and advanced configuration options, see th
 ### [Plugin Security Demo](examples/security-demo/)
 **NEW:** Comprehensive security system with hash-based plugin whitelist. Demonstrates authorized plugin validation, hot reload configuration changes, and audit trail monitoring with Argus integration.
 
-### [Unix Socket Plugin](examples/unix-socket-plugin/)
-File manager using Unix domain sockets. High-performance local communication for file operations.
+### [Subprocess Plugin](examples/subprocess-plugin/)
+File manager using subprocess execution. High-performance process-based plugin communication.
 
 ### [Graceful Draining Demo](examples/graceful-draining-demo/)
 **NEW:** Demonstrates the enhanced active request monitoring and intelligent graceful draining system. Shows real-time request tracking, precision drain detection, and zero-downtime operations that replace fixed `time.Sleep()` delays.
@@ -856,9 +852,8 @@ go run .
 - `PluginFactory[Req, Resp]`: Factory interface for creating plugin instances from configuration
 
 ### Transport Implementations
-- `HTTPPlugin[Req, Resp]`: HTTP/HTTPS transport with authentication and connection pooling
-- `GRPCNativePlugin[Req, Resp]`: gRPC transport with native protobuf support (industry-standard)
-- `UnixSocketPlugin[Req, Resp]`: Unix domain socket transport for high-performance local communication
+- `SubprocessPlugin[Req, Resp]`: Subprocess execution transport for secure process-based plugin communication (recommended)
+- `GRPCNativePlugin[Req, Resp]`: gRPC transport with native protobuf support for ecosystem compatibility
 
 ### Multi-Format Configuration Support
 

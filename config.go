@@ -14,25 +14,22 @@ import (
 
 // TransportType represents the different transport protocols supported by the plugin system.
 //
-// Each transport type defines how plugins communicate with their underlying services:
-//   - gRPC: High-performance RPC communication with optional TLS
-//   - Executable: Direct execution of external processes (subprocess plugins)
-//
-// Note: HTTP/HTTPS transports removed - subprocess model provides better security and isolation
+// Supported transport types:
+//   - Executable: Direct execution of external processes (subprocess plugins) - Primary approach
+//   - gRPC: High-performance RPC communication with optional TLS - For compatibility
 //
 // Example usage:
 //
 //	config := PluginConfig{
-//	    Transport: TransportGRPC,
-//	    Endpoint:  "localhost:50051",
+//	    Transport: TransportExecutable,
+//	    Endpoint:  "./my-plugin",
 //	}
 type TransportType string
 
 const (
-	// HTTP transports removed - subprocess model provides better security
-	TransportGRPC       TransportType = "grpc"     // DEPRECATED: JSON over gRPC, use native protobuf instead
-	TransportGRPCTLS    TransportType = "grpc-tls" // DEPRECATED: JSON over gRPC, use native protobuf instead
-	TransportExecutable TransportType = "exec"
+	TransportGRPC       TransportType = "grpc"     // gRPC protocol support
+	TransportGRPCTLS    TransportType = "grpc-tls" // gRPC with TLS
+	TransportExecutable TransportType = "exec"     // Subprocess execution (recommended)
 )
 
 // AuthMethod represents different authentication methods supported by the plugin system.
@@ -272,12 +269,12 @@ type RateLimitConfig struct {
 //
 // Example configurations:
 //
-//	// HTTP plugin with API key authentication
-//	httpPlugin := PluginConfig{
+//	// Subprocess plugin with API key authentication
+//	subprocessPlugin := PluginConfig{
 //	    Name:      "payment-service",
-//	    Type:      "payment",
-//	    Transport: TransportHTTPS,
-//	    Endpoint:  "https://payments.example.com/api/v1",
+//	    Type:      "subprocess",
+//	    Transport: TransportExecutable,
+//	    Endpoint:  "./payment-plugin",
 //	    Enabled:   true,
 //	    Priority:  1,
 //	    Auth: AuthConfig{
@@ -378,8 +375,8 @@ type PluginConfig struct {
 //	    Plugins: []PluginConfig{
 //	        {
 //	            Name:      "auth-service",
-//	            Transport: TransportHTTPS,
-//	            Endpoint:  "https://auth.example.com/api/v1",
+//	            Transport: TransportExecutable,
+//	            Endpoint:  "./auth-plugin",
 //	            // Inherits default retry and health check settings
 //	        },
 //	    },

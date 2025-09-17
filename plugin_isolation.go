@@ -357,10 +357,10 @@ func NewPluginIsolationManager(config IsolationConfig) *PluginIsolationManager {
 
 	// Set observability defaults
 	if config.ObservabilityConfig.MetricsCollector == nil {
-		config.ObservabilityConfig.MetricsCollector = NewDefaultMetricsCollector()
+		config.ObservabilityConfig.MetricsCollector = NewEnhancedMetricsCollector()
 	}
-	if !config.ObservabilityConfig.MetricsEnabled {
-		config.ObservabilityConfig.MetricsEnabled = true // Enable by default for isolation
+	if config.ObservabilityConfig.Level == ObservabilityDisabled {
+		config.ObservabilityConfig.Level = ObservabilityStandard // Enable by default for isolation
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -392,15 +392,15 @@ func (pim *PluginIsolationManager) initializeObservability() {
 	pim.metricsCollector = pim.config.ObservabilityConfig.MetricsCollector
 	pim.tracingProvider = pim.config.ObservabilityConfig.TracingProvider
 
-	// Create common plugin metrics if enhanced collector is available
-	if enhancedCollector, ok := pim.metricsCollector.(EnhancedMetricsCollector); ok {
-		pim.commonMetrics = CreateCommonPluginMetrics(enhancedCollector)
-		pim.isolationMetrics = pim.createIsolationSpecificMetrics(enhancedCollector)
+	// Create common plugin metrics if advanced features are available
+	if pim.metricsCollector.CounterWithLabels("test", "test") != nil {
+		pim.commonMetrics = CreateCommonPluginMetrics(pim.metricsCollector)
+		pim.isolationMetrics = pim.createIsolationSpecificMetrics(pim.metricsCollector)
 	}
 }
 
 // createIsolationSpecificMetrics creates metrics specific to plugin isolation.
-func (pim *PluginIsolationManager) createIsolationSpecificMetrics(collector EnhancedMetricsCollector) *IsolationSpecificMetrics {
+func (pim *PluginIsolationManager) createIsolationSpecificMetrics(collector MetricsCollector) *IsolationSpecificMetrics {
 	prefix := pim.config.ObservabilityConfig.MetricsPrefix
 	if prefix == "" {
 		prefix = "goplugins_isolation"
@@ -799,13 +799,13 @@ func (ic *IsolatedPluginClient) handleFallback(method string, _ interface{}, ori
 		return ic.config.FallbackConfig.DefaultResponse, nil
 
 	case FallbackStrategyCached:
-		// TODO: Implement cached response fallback
-		ic.logger.Warn("Cached fallback not yet implemented", "method", method)
+		// Cached fallback strategy - return original error for now
+		ic.logger.Warn("Cached fallback not implemented", "method", method)
 		return nil, originalErr
 
 	case FallbackStrategyGraceful:
-		// TODO: Implement graceful degradation
-		ic.logger.Warn("Graceful fallback not yet implemented", "method", method)
+		// Graceful degradation strategy - return original error for now
+		ic.logger.Warn("Graceful fallback not implemented", "method", method)
 		return nil, originalErr
 
 	default:
@@ -941,11 +941,7 @@ func (ic *IsolatedPluginClient) startProcess() error {
 	cmd := exec.Command(pluginBinaryPath) // #nosec G204 -- path validated above
 
 	// Apply process isolation settings
-	if ic.process.processGroup {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setpgid: true,
-		}
-	}
+	configureProcAttr(cmd, ic.process.processGroup)
 
 	// Set working directory if sandbox is configured
 	if ic.process.sandboxDir != "" {
@@ -1049,8 +1045,6 @@ func (ic *IsolatedPluginClient) updateResponseTimeStats(duration time.Duration) 
 		}
 		// If CAS failed, retry
 	}
-
-	// TODO: Implement more sophisticated average calculation
 }
 
 // NewProcessMonitor creates a new process monitor.
@@ -1143,17 +1137,14 @@ func (pm *ProcessMonitor) checkProcess(_ string, process *PluginProcess) {
 		}
 	}
 
-	// TODO: Implement resource usage monitoring
-	// - Memory usage via /proc/[pid]/status
-	// - CPU usage via /proc/[pid]/stat
-	// - Compare against limits and trigger alerts
+	// Basic process monitoring - resource usage monitoring not implemented
 }
 
 // Observability methods for IsolatedPluginClient
 
 // setupObservabilityTracing sets up distributed tracing for the plugin call.
 func (ic *IsolatedPluginClient) setupObservabilityTracing(ctx context.Context, _ string) (context.Context, Span) {
-	if !ic.config.ObservabilityConfig.TracingEnabled {
+	if !ic.config.ObservabilityConfig.IsTracingEnabled() {
 		return ctx, nil
 	}
 

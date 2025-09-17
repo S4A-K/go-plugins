@@ -69,8 +69,12 @@ func TestLibraryConfigIntegration_CompleteWorkflow(t *testing.T) {
 	}
 
 	for key, value := range testEnvVars {
-		os.Setenv(key, value)
-		defer os.Unsetenv(key)
+		if err := os.Setenv(key, value); err != nil {
+			t.Fatalf("Failed to set %s: %v", key, err)
+		}
+		defer func(k string) {
+			_ = os.Unsetenv(k)
+		}(key)
 	}
 
 	// Create initial library configuration with environment variables
@@ -227,8 +231,12 @@ func TestLibraryConfigIntegration_CompleteWorkflow(t *testing.T) {
 	// Test Phase 3: Environment variable changes with re-expansion
 	t.Run("environment variable changes with re-expansion", func(t *testing.T) {
 		// Change environment variable
-		os.Setenv("GO_PLUGINS_LOG_LEVEL", "warn")
-		defer os.Setenv("GO_PLUGINS_LOG_LEVEL", "info")
+		if err := os.Setenv("GO_PLUGINS_LOG_LEVEL", "warn"); err != nil {
+			t.Fatalf("Failed to set GO_PLUGINS_LOG_LEVEL: %v", err)
+		}
+		defer func() {
+			_ = os.Setenv("GO_PLUGINS_LOG_LEVEL", "info")
+		}()
 
 		// Get current config
 		originalConfig := watcher.GetCurrentConfig()

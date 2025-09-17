@@ -56,6 +56,38 @@ const (
 	ErrCodeHealthCheckFailed  = "HEALTH_1601"
 	ErrCodeHealthCheckTimeout = "HEALTH_1602"
 
+	// Configuration management errors (1700-1799)
+	ErrCodeConfigNotFound        = "CONFIG_1701"
+	ErrCodeConfigParseError      = "CONFIG_1702"
+	ErrCodeConfigValidationError = "CONFIG_1703"
+	ErrCodeConfigWatcherError    = "CONFIG_1704"
+	ErrCodeConfigPathError       = "CONFIG_1705"
+	ErrCodeConfigFileError       = "CONFIG_1706"
+	ErrCodeConfigPermissionError = "CONFIG_1707"
+
+	// Security errors (1800-1899)
+	ErrCodeSecurityValidationError = "SECURITY_1801"
+	ErrCodeWhitelistError          = "SECURITY_1802"
+	ErrCodeHashValidationError     = "SECURITY_1803"
+	ErrCodePathTraversalError      = "SECURITY_1804"
+	ErrCodeFilePermissionError     = "SECURITY_1805"
+	ErrCodeAuditError              = "SECURITY_1806"
+
+	// Registry and isolation errors (1900-1999)
+	ErrCodeRegistryError  = "REGISTRY_1901"
+	ErrCodeIsolationError = "REGISTRY_1902"
+	ErrCodeProcessError   = "REGISTRY_1903"
+	ErrCodeFactoryError   = "REGISTRY_1904"
+	ErrCodeClientError    = "REGISTRY_1905"
+	ErrCodeDiscoveryError = "REGISTRY_1906"
+
+	// RPC and communication errors (2000-2099)
+	ErrCodeRPCError           = "RPC_2001"
+	ErrCodeHandshakeError     = "RPC_2002"
+	ErrCodeCommunicationError = "RPC_2003"
+	ErrCodeProtocolError      = "RPC_2004"
+	ErrCodeSerializationError = "RPC_2005"
+
 	// Load balancer errors removed - using direct subprocess communication
 )
 
@@ -290,5 +322,175 @@ func NewPluginValidationError(pluginIndex int, cause error) *errors.Error {
 func NewAuthConfigValidationError(cause error) *errors.Error {
 	return errors.Wrap(cause, ErrCodeUnsupportedAuthMethod, "Authentication configuration validation failed").
 		WithUserMessage("Invalid authentication configuration").
+		WithSeverity("error")
+}
+
+// Configuration management error constructors
+
+func NewConfigNotFoundError(path string) *errors.Error {
+	return errors.New(ErrCodeConfigNotFound, "Configuration file not found").
+		WithUserMessage("The configuration file could not be found").
+		WithContext("config_path", path).
+		WithSeverity("error")
+}
+
+func NewConfigParseError(path string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeConfigParseError, "Configuration parse error").
+		WithUserMessage("Failed to parse configuration file").
+		WithContext("config_path", path).
+		WithSeverity("error")
+}
+
+func NewConfigValidationError(message string, cause error) *errors.Error {
+	err := errors.New(ErrCodeConfigValidationError, "Configuration validation error: "+message).
+		WithUserMessage("Configuration validation failed").
+		WithSeverity("error")
+	if cause != nil {
+		return errors.Wrap(cause, ErrCodeConfigValidationError, "Configuration validation error: "+message).
+			WithUserMessage("Configuration validation failed").
+			WithSeverity("error")
+	}
+	return err
+}
+
+func NewConfigWatcherError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeConfigWatcherError, "Configuration watcher error: "+message).
+		WithUserMessage("Configuration monitoring failed").
+		WithSeverity("error")
+}
+
+func NewConfigPathError(path string, message string) *errors.Error {
+	return errors.New(ErrCodeConfigPathError, "Configuration path error: "+message).
+		WithUserMessage("Invalid configuration file path").
+		WithContext("config_path", path).
+		WithSeverity("error")
+}
+
+func NewConfigFileError(path string, message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeConfigFileError, "Configuration file error: "+message).
+		WithUserMessage("Configuration file access failed").
+		WithContext("config_path", path).
+		WithSeverity("error")
+}
+
+func NewConfigPermissionError(path string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeConfigPermissionError, "Configuration permission error").
+		WithUserMessage("Insufficient permissions to access configuration file").
+		WithContext("config_path", path).
+		WithSeverity("error")
+}
+
+// Security error constructors
+
+func NewSecurityValidationError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeSecurityValidationError, "Security validation error: "+message).
+		WithUserMessage("Security validation failed").
+		WithSeverity("error")
+}
+
+func NewWhitelistError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeWhitelistError, "Whitelist error: "+message).
+		WithUserMessage("Plugin whitelist validation failed").
+		WithSeverity("error")
+}
+
+func NewHashValidationError(pluginPath string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeHashValidationError, "Hash validation error").
+		WithUserMessage("Plugin integrity verification failed").
+		WithContext("plugin_path", pluginPath).
+		WithSeverity("error")
+}
+
+func NewPathTraversalError(path string) *errors.Error {
+	return errors.New(ErrCodePathTraversalError, "Path traversal attempt detected").
+		WithUserMessage("Invalid file path detected").
+		WithContext("attempted_path", path).
+		WithSeverity("error")
+}
+
+func NewFilePermissionError(path string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeFilePermissionError, "File permission error").
+		WithUserMessage("Insufficient permissions to access file").
+		WithContext("file_path", path).
+		WithSeverity("error")
+}
+
+func NewAuditError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeAuditError, "Audit error: "+message).
+		WithUserMessage("Security audit logging failed").
+		WithSeverity("warning")
+}
+
+// Registry and isolation error constructors
+
+func NewRegistryError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeRegistryError, "Registry error: "+message).
+		WithUserMessage("Plugin registry operation failed").
+		WithSeverity("error")
+}
+
+func NewIsolationError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeIsolationError, "Isolation error: "+message).
+		WithUserMessage("Plugin isolation failed").
+		WithSeverity("error")
+}
+
+func NewProcessError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeProcessError, "Process error: "+message).
+		WithUserMessage("Plugin process management failed").
+		WithSeverity("error")
+}
+
+func NewFactoryError(pluginType string, message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeFactoryError, "Factory error: "+message).
+		WithUserMessage("Plugin factory operation failed").
+		WithContext("plugin_type", pluginType).
+		WithSeverity("error")
+}
+
+func NewClientError(clientName string, message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeClientError, "Client error: "+message).
+		WithUserMessage("Plugin client operation failed").
+		WithContext("client_name", clientName).
+		WithSeverity("error")
+}
+
+func NewDiscoveryError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeDiscoveryError, "Discovery error: "+message).
+		WithUserMessage("Plugin discovery failed").
+		WithSeverity("error")
+}
+
+// RPC and communication error constructors
+
+func NewRPCError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeRPCError, "RPC error: "+message).
+		WithUserMessage("RPC communication failed").
+		WithSeverity("error").
+		AsRetryable()
+}
+
+func NewHandshakeError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeHandshakeError, "Handshake error: "+message).
+		WithUserMessage("Plugin handshake failed").
+		WithSeverity("error")
+}
+
+func NewCommunicationError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeCommunicationError, "Communication error: "+message).
+		WithUserMessage("Plugin communication failed").
+		WithSeverity("error").
+		AsRetryable()
+}
+
+func NewPluginProtocolError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeProtocolError, "Protocol error: "+message).
+		WithUserMessage("Protocol error occurred").
+		WithSeverity("error")
+}
+
+func NewSerializationError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeSerializationError, "Serialization error: "+message).
+		WithUserMessage("Data serialization failed").
 		WithSeverity("error")
 }

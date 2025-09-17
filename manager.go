@@ -8,13 +8,10 @@ package goplugins
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/agilira/argus"
 )
 
 // Manager implements PluginManager with comprehensive production-ready features.
@@ -39,17 +36,17 @@ import (
 //	manager := NewManager[AuthRequest, AuthResponse](logger)
 //
 //	// Register plugin factories
-//	httpFactory := NewHTTPPluginFactory[AuthRequest, AuthResponse]()
-//	manager.RegisterFactory("http", httpFactory)
+//	subprocessFactory := NewSubprocessPluginFactory[AuthRequest, AuthResponse]()
+//	manager.RegisterFactory("subprocess", subprocessFactory)
 //
 //	// Load configuration
 //	config := ManagerConfig{
 //	    Plugins: []PluginConfig{
 //	        {
 //	            Name:      "auth-service",
-//	            Type:      "http",
-//	            Transport: TransportHTTPS,
-//	            Endpoint:  "https://auth.company.com/api/v1",
+//	            Type:      "subprocess",
+//	            Transport: TransportExecutable,
+//	            Endpoint:  "./auth-plugin",
 //	        },
 //	    },
 //	}
@@ -92,11 +89,24 @@ type Manager[Req, Resp any] struct {
 	discoveryEngine *DiscoveryEngine
 	dynamicLoader   *DynamicLoader[Req, Resp]
 
-	// Observability integration
+	// Observability management (refactored)
+	observabilityManager *ObservabilityManager
+
+	// Compatibility accessors (temporary during refactoring)
 	observabilityConfig ObservabilityConfig
 	metricsCollector    MetricsCollector
 	commonMetrics       *CommonPluginMetrics
 	tracingProvider     TracingProvider
+
+	// Runtime observability metrics (compatibility)
+	startTime      time.Time
+	totalRequests  *atomic.Int64
+	totalErrors    *atomic.Int64
+	activeRequests *atomic.Int64
+
+	// Plugin-specific detailed metrics (compatibility)
+	pluginMetrics map[string]*PluginObservabilityMetrics
+	metricsMu     sync.RWMutex
 
 	// Security validation
 	securityValidator *SecurityValidator
@@ -105,6 +115,38 @@ type Manager[Req, Resp any] struct {
 	mu       sync.RWMutex
 	shutdown atomic.Bool
 	wg       sync.WaitGroup
+}
+
+// PluginObservabilityMetrics contains detailed metrics for a single plugin
+// (integrated from ObservableManager)
+type PluginObservabilityMetrics struct {
+	// Request metrics
+	TotalRequests      *atomic.Int64
+	SuccessfulRequests *atomic.Int64
+	FailedRequests     *atomic.Int64
+	ActiveRequests     *atomic.Int64
+
+	// Timing metrics
+	TotalLatency *atomic.Int64 // Total latency in nanoseconds
+	MinLatency   *atomic.Int64
+	MaxLatency   *atomic.Int64
+	AvgLatency   *atomic.Int64
+
+	// Error metrics
+	TimeoutErrors    *atomic.Int64
+	ConnectionErrors *atomic.Int64
+	AuthErrors       *atomic.Int64
+	OtherErrors      *atomic.Int64
+
+	// Circuit breaker metrics
+	CircuitBreakerTrips *atomic.Int64
+	CircuitBreakerState *atomic.Value // stores string
+
+	// Health metrics
+	HealthCheckTotal  *atomic.Int64
+	HealthCheckFailed *atomic.Int64
+	LastHealthCheck   *atomic.Int64 // Unix timestamp
+	HealthStatus      *atomic.Value // stores string
 }
 
 // ManagerMetrics tracks operational metrics
@@ -183,15 +225,9 @@ func NewManager[Req, Resp any](logger any) *Manager[Req, Resp] {
 	// Initialize discovery engine
 	discoveryEngine := NewDiscoveryEngine(discoveryConfig, internalLogger)
 
-	// Initialize observability
+	// Initialize observability manager (refactored)
 	observabilityConfig := DefaultObservabilityConfig()
-	metricsCollector := observabilityConfig.MetricsCollector
-
-	// Create enhanced metrics collector if supported
-	var commonMetrics *CommonPluginMetrics
-	if enhancedCollector, ok := metricsCollector.(EnhancedMetricsCollector); ok {
-		commonMetrics = CreateCommonPluginMetrics(enhancedCollector)
-	}
+	observabilityManager := NewObservabilityManager(observabilityConfig, internalLogger)
 
 	// Initialize security validator with default config (disabled by default)
 	securityConfig := DefaultSecurityConfig()
@@ -201,20 +237,28 @@ func NewManager[Req, Resp any](logger any) *Manager[Req, Resp] {
 	}
 
 	manager := &Manager[Req, Resp]{
-		plugins:             make(map[string]Plugin[Req, Resp]),
-		factories:           make(map[string]PluginFactory[Req, Resp]),
-		breakers:            make(map[string]*CircuitBreaker),
-		healthCheckers:      make(map[string]*HealthChecker),
-		healthStatus:        make(map[string]HealthStatus),
-		logger:              internalLogger,
-		metrics:             &ManagerMetrics{},
-		requestTracker:      NewRequestTrackerWithObservability(metricsCollector, observabilityConfig.MetricsPrefix),
-		discoveryEngine:     discoveryEngine,
+		plugins:              make(map[string]Plugin[Req, Resp]),
+		factories:            make(map[string]PluginFactory[Req, Resp]),
+		breakers:             make(map[string]*CircuitBreaker),
+		healthCheckers:       make(map[string]*HealthChecker),
+		healthStatus:         make(map[string]HealthStatus),
+		logger:               internalLogger,
+		metrics:              &ManagerMetrics{},
+		requestTracker:       NewRequestTrackerWithObservability(observabilityManager.metricsCollector, observabilityConfig.MetricsPrefix),
+		discoveryEngine:      discoveryEngine,
+		observabilityManager: observabilityManager,
+		securityValidator:    securityValidator,
+
+		// Compatibility fields (temporary during refactoring)
 		observabilityConfig: observabilityConfig,
-		metricsCollector:    metricsCollector,
-		commonMetrics:       commonMetrics,
-		tracingProvider:     observabilityConfig.TracingProvider,
-		securityValidator:   securityValidator,
+		metricsCollector:    observabilityManager.metricsCollector,
+		commonMetrics:       observabilityManager.commonMetrics,
+		tracingProvider:     observabilityManager.tracingProvider,
+		startTime:           observabilityManager.startTime,
+		totalRequests:       observabilityManager.totalRequests,
+		totalErrors:         observabilityManager.totalErrors,
+		activeRequests:      observabilityManager.activeRequests,
+		pluginMetrics:       observabilityManager.pluginMetrics,
 	}
 
 	// Initialize dynamic loader
@@ -223,627 +267,77 @@ func NewManager[Req, Resp any](logger any) *Manager[Req, Resp] {
 	return manager
 }
 
-// Register implements PluginManager.Register
-func (m *Manager[Req, Resp]) Register(plugin Plugin[Req, Resp]) error {
-	return m.RegisterWithConfig(plugin, PluginConfig{})
+// recordObservabilityStart records the start of a request for observability tracking
+func (m *Manager[Req, Resp]) recordObservabilityStart(pluginName string) {
+	// Use the refactored ObservabilityManager
+	m.observabilityManager.RecordObservabilityStart(pluginName)
 }
 
-// RegisterWithConfig registers a plugin with security validation using the provided config
-func (m *Manager[Req, Resp]) RegisterWithConfig(plugin Plugin[Req, Resp], config PluginConfig) error {
-	if m.shutdown.Load() {
-		return errors.New("manager is shut down")
-	}
-
-	info := plugin.Info()
-	if info.Name == "" {
-		return errors.New("plugin name cannot be empty")
-	}
-
-	// Use plugin info to populate config if not provided
-	if config.Name == "" {
-		config.Name = info.Name
-	}
-	// Note: Plugin type needs to be provided in config since it's not available in PluginInfo
-
-	// Validate plugin security if enabled
-	if m.securityValidator != nil && m.securityValidator.IsEnabled() {
-		validationResult, err := m.securityValidator.ValidatePlugin(config, "")
-		if err != nil {
-			return fmt.Errorf("security validation error for plugin %s: %w", info.Name, err)
-		}
-
-		if !validationResult.Authorized {
-			return fmt.Errorf("plugin %s rejected by security policy: %v",
-				info.Name, validationResult.Violations)
-		}
-
-		m.logger.Info("Plugin security validation passed",
-			"plugin", info.Name,
-			"policy", validationResult.Policy.String())
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if _, exists := m.plugins[info.Name]; exists {
-		return fmt.Errorf("plugin %s is already registered", info.Name)
-	}
-
-	// Initialize circuit breaker for the plugin
-	m.breakers[info.Name] = NewCircuitBreaker(CircuitBreakerConfig{
-		Enabled:             true,
-		FailureThreshold:    5,
-		RecoveryTimeout:     30 * time.Second,
-		MinRequestThreshold: 3,
-		SuccessThreshold:    2,
-	})
-
-	// Initialize health checker with observability integration
-	healthChecker := NewHealthChecker(plugin, HealthCheckConfig{
-		Enabled:      true,
-		Interval:     30 * time.Second,
-		Timeout:      5 * time.Second,
-		FailureLimit: 3,
-	})
-
-	m.healthCheckers[info.Name] = healthChecker
-
-	m.plugins[info.Name] = plugin
-
-	// Initialize health status
-	m.healthStatus[info.Name] = HealthStatus{
-		Status:    StatusHealthy,
-		Message:   "Plugin registered",
-		LastCheck: time.Now(),
-	}
-
-	// Start health monitoring
-	m.wg.Add(1)
-	go m.monitorPluginHealth(info.Name)
-
-	m.logger.Info("Plugin registered successfully",
-		"plugin", info.Name,
-		"version", info.Version)
-
-	return nil
+// recordObservabilityEnd records the end of a request for observability tracking
+func (m *Manager[Req, Resp]) recordObservabilityEnd(pluginName string, duration time.Duration, err error) {
+	// Use the refactored ObservabilityManager
+	m.observabilityManager.RecordObservabilityEnd(pluginName, duration, err)
 }
 
-// Unregister implements PluginManager.Unregister
-func (m *Manager[Req, Resp]) Unregister(name string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	plugin, exists := m.plugins[name]
-	if !exists {
-		return fmt.Errorf("plugin %s not found", name)
-	}
-
-	// Stop health monitoring
-	if checker, ok := m.healthCheckers[name]; ok {
-		checker.Stop()
-		delete(m.healthCheckers, name)
-	}
-
-	// Clean up circuit breaker
-	delete(m.breakers, name)
-	delete(m.healthStatus, name)
-
-	// Close the plugin
-	if err := plugin.Close(); err != nil {
-		m.logger.Warn("Error closing plugin during unregister",
-			"plugin", name, "error", err)
-	}
-
-	delete(m.plugins, name)
-
-	m.logger.Info("Plugin unregistered", "plugin", name)
-	return nil
-}
-
-// Execute implements PluginManager.Execute
-func (m *Manager[Req, Resp]) Execute(ctx context.Context, pluginName string, request Req) (Resp, error) {
-	execCtx := ExecutionContext{
-		RequestID:  generateRequestID(),
-		Timeout:    30 * time.Second,
-		MaxRetries: 3,
-	}
-	return m.ExecuteWithOptions(ctx, pluginName, execCtx, request)
-}
-
-// ExecuteWithOptions implements PluginManager.ExecuteWithOptions
-func (m *Manager[Req, Resp]) ExecuteWithOptions(ctx context.Context, pluginName string, execCtx ExecutionContext, request Req) (Resp, error) {
-	var zero Resp
-
-	if m.shutdown.Load() {
-		return zero, errors.New("manager is shut down")
-	}
-
-	// Track request for graceful draining
-	m.requestTracker.StartRequest(pluginName, ctx)
-	defer m.requestTracker.EndRequest(pluginName, ctx)
-
-	startTime := time.Now()
-	defer m.recordExecutionMetrics(startTime)
-
-	// Setup observability tracking
-	m.recordObservabilityStart(pluginName)
-	defer m.recordObservabilityEnd(pluginName)
-
-	// Setup tracing if enabled
-	ctx, span := m.setupTracing(ctx, pluginName, execCtx)
-	if span != nil {
-		defer span.Finish()
-		m.injectTracingHeaders(ctx, &execCtx)
-	}
-
-	// Get plugin and circuit breaker
-	plugin, breaker, err := m.getPluginAndBreaker(pluginName)
-	if err != nil {
-		m.recordObservabilityError(pluginName, startTime, err, span)
-		return zero, err
-	}
-
-	// Check circuit breaker
-	if !breaker.AllowRequest() {
-		m.metrics.RequestsFailure.Add(1)
-		err := fmt.Errorf("circuit breaker is open for plugin %s", pluginName)
-		m.recordObservabilityError(pluginName, startTime, err, span)
-		return zero, err
-	}
-
-	// Execute with timeout
-	execCtxWithTimeout, cancel := context.WithTimeout(ctx, execCtx.Timeout)
-	defer cancel()
-
-	// Execute with retry logic
-	response, err := m.executePluginWithRetries(execCtxWithTimeout, plugin, breaker, pluginName, execCtx, request)
-
-	// Record observability results
+// recordObservabilityError records error metrics and tracing information
+func (m *Manager[Req, Resp]) recordObservabilityError(pluginName string, startTime time.Time, err error, span Span) {
 	latency := time.Since(startTime)
-	m.recordObservabilityResult(pluginName, latency, err, span, execCtx)
 
-	return response, err
-}
+	// Use the refactored ObservabilityManager for error recording
+	m.observabilityManager.RecordObservabilityEnd(pluginName, latency, err)
 
-// recordExecutionMetrics records timing and count metrics for plugin execution
-func (m *Manager[Req, Resp]) recordExecutionMetrics(startTime time.Time) {
-	duration := time.Since(startTime)
-	m.metrics.RequestDuration.Add(duration.Nanoseconds())
-	m.metrics.RequestsTotal.Add(1)
-}
-
-// getPluginAndBreaker retrieves plugin and circuit breaker for execution
-func (m *Manager[Req, Resp]) getPluginAndBreaker(pluginName string) (Plugin[Req, Resp], *CircuitBreaker, error) {
-	m.mu.RLock()
-	plugin, exists := m.plugins[pluginName]
-	breaker, hasBreakerr := m.breakers[pluginName]
-	m.mu.RUnlock()
-
-	if !exists {
-		m.metrics.RequestsFailure.Add(1)
-		return nil, nil, fmt.Errorf("plugin %s not found", pluginName)
+	// Set span error status (keep tracing logic)
+	if span != nil {
+		span.SetStatus(SpanStatusError, err.Error())
+		span.SetAttribute("error", true)
+		span.SetAttribute("error.message", err.Error())
 	}
 
-	if !hasBreakerr {
-		m.metrics.RequestsFailure.Add(1)
-		return nil, nil, fmt.Errorf("circuit breaker not found for plugin %s", pluginName)
-	}
-
-	return plugin, breaker, nil
-}
-
-// executePluginWithRetries executes the plugin with retry logic
-func (m *Manager[Req, Resp]) executePluginWithRetries(ctx context.Context, plugin Plugin[Req, Resp], breaker *CircuitBreaker, pluginName string, execCtx ExecutionContext, request Req) (Resp, error) {
-	var zero Resp
-	var resp Resp
-	var err error
-
-	for attempt := 0; attempt <= execCtx.MaxRetries; attempt++ {
-		if attempt > 0 {
-			if shouldAbort := m.handleRetryBackoff(ctx, breaker, attempt); shouldAbort {
-				return zero, ctx.Err()
-			}
-		}
-
-		resp, err = plugin.Execute(ctx, execCtx, request)
-		if err == nil {
-			return m.handlePluginSuccess(breaker, pluginName, execCtx, attempt, resp)
-		}
-
-		// Check if error is retryable
-		if !isRetryableError(err) || attempt == execCtx.MaxRetries {
-			break
-		}
-
-		m.logRetryAttempt(pluginName, execCtx, attempt, err)
-	}
-
-	// All retries failed
-	return m.handlePluginFailure(breaker, pluginName, execCtx, err)
-}
-
-// handleRetryBackoff manages backoff timing for retries
-func (m *Manager[Req, Resp]) handleRetryBackoff(ctx context.Context, breaker *CircuitBreaker, attempt int) bool {
-	backoffDuration := calculateBackoff(attempt, 100*time.Millisecond, 5*time.Second, 2.0)
-	select {
-	case <-ctx.Done():
-		m.metrics.RequestsFailure.Add(1)
-		breaker.RecordFailure()
-		return true
-	case <-time.After(backoffDuration):
-		return false
+	// Log error if enabled
+	if m.observabilityManager.IsLoggingEnabled() {
+		m.logger.Error("Plugin execution failed",
+			"plugin", pluginName,
+			"latency", latency,
+			"error", err)
 	}
 }
 
-// handlePluginSuccess handles successful plugin execution
-func (m *Manager[Req, Resp]) handlePluginSuccess(breaker *CircuitBreaker, pluginName string, execCtx ExecutionContext, attempt int, resp Resp) (Resp, error) {
-	breaker.RecordSuccess()
-	m.metrics.RequestsSuccess.Add(1)
-
-	// Record circuit breaker state change if needed
-	m.recordCircuitBreakerMetrics(pluginName, breaker.GetState())
-
-	m.logger.Debug("Plugin execution successful",
-		"plugin", pluginName,
-		"request_id", execCtx.RequestID,
-		"attempt", attempt+1)
-	return resp, nil
-}
-
-// logRetryAttempt logs a retry attempt
-func (m *Manager[Req, Resp]) logRetryAttempt(pluginName string, execCtx ExecutionContext, attempt int, err error) {
-	m.logger.Warn("Plugin execution failed, retrying",
-		"plugin", pluginName,
-		"request_id", execCtx.RequestID,
-		"attempt", attempt+1,
-		"error", err)
-}
-
-// handlePluginFailure handles failed plugin execution after all retries
-func (m *Manager[Req, Resp]) handlePluginFailure(breaker *CircuitBreaker, pluginName string, execCtx ExecutionContext, err error) (Resp, error) {
-	var zero Resp
-	breaker.RecordFailure()
-	m.metrics.RequestsFailure.Add(1)
-
-	// Record circuit breaker state change and trip metrics
-	newState := breaker.GetState()
-	m.recordCircuitBreakerMetrics(pluginName, newState)
-
-	// Record circuit breaker trips if it opened
-	if newState == StateOpen {
-		m.metrics.CircuitBreakerTrips.Add(1)
-	}
-
-	return zero, fmt.Errorf("plugin %s execution failed after %d attempts: %w",
-		pluginName, execCtx.MaxRetries+1, err)
-}
-
-// GetPlugin implements PluginManager.GetPlugin
-func (m *Manager[Req, Resp]) GetPlugin(name string) (Plugin[Req, Resp], error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	plugin, exists := m.plugins[name]
-	if !exists {
-		return nil, fmt.Errorf("plugin %s not found", name)
-	}
-
-	return plugin, nil
-}
-
-// ListPlugins implements PluginManager.ListPlugins
-func (m *Manager[Req, Resp]) ListPlugins() map[string]HealthStatus {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	result := make(map[string]HealthStatus)
-	for name, status := range m.healthStatus {
-		result[name] = status
-	}
-
-	return result
-}
-
-// LoadFromConfig implements PluginManager.LoadFromConfig
-func (m *Manager[Req, Resp]) LoadFromConfig(config ManagerConfig) error {
-	if err := config.Validate(); err != nil {
-		return fmt.Errorf("invalid configuration: %w", err)
-	}
-
-	config.ApplyDefaults()
-	m.config = config
-
-	// Update security configuration if provided
-	if config.Security.Enabled {
-		if m.securityValidator != nil {
-			if err := m.securityValidator.UpdateConfig(config.Security); err != nil {
-				m.logger.Warn("Failed to update security config", "error", err)
-			} else {
-				if err := m.securityValidator.Enable(); err != nil {
-					m.logger.Warn("Failed to enable security validator", "error", err)
-				}
-			}
-		}
-	}
-
-	// Load plugins from configuration
-	for _, pluginConfig := range config.Plugins {
-		if !pluginConfig.Enabled {
-			continue
-		}
-
-		factory, exists := m.factories[pluginConfig.Type]
-		if !exists {
-			return fmt.Errorf("no factory registered for plugin type: %s", pluginConfig.Type)
-		}
-
-		plugin, err := factory.CreatePlugin(pluginConfig)
-		if err != nil {
-			return fmt.Errorf("failed to create plugin %s: %w", pluginConfig.Name, err)
-		}
-
-		if err := m.RegisterWithConfig(plugin, pluginConfig); err != nil {
-			return fmt.Errorf("failed to register plugin %s: %w", pluginConfig.Name, err)
-		}
-	}
-
-	return nil
-}
-
-// ReloadConfig implements PluginManager.ReloadConfig with simple recreation strategy
-func (m *Manager[Req, Resp]) ReloadConfig(config ManagerConfig) error {
-	if err := config.Validate(); err != nil {
-		return fmt.Errorf("invalid configuration: %w", err)
-	}
-
-	// Get current plugin names
-	m.mu.RLock()
-	currentPlugins := make([]string, 0, len(m.plugins))
-	for name := range m.plugins {
-		currentPlugins = append(currentPlugins, name)
-	}
-	m.mu.RUnlock()
-
-	// Unregister existing plugins
-	for _, name := range currentPlugins {
-		if err := m.Unregister(name); err != nil {
-			m.logger.Warn("Failed to unregister plugin during reload",
-				"plugin", name, "error", err)
-		}
-	}
-
-	// Load new configuration
-	return m.LoadFromConfig(config)
-}
-
-// EnableDynamicConfiguration starts Argus-powered hot reload for the given config file
-// This replaces the old hot-reload system with ultra-fast Argus monitoring (12.10ns/op)
-//
-// Parameters:
-//   - configPath: Path to JSON configuration file to watch
-//   - options: Dynamic config options (use DefaultDynamicConfigOptions() for defaults)
-//
-// Example:
-//
-//	manager := NewManager[MyRequest, MyResponse](logger)
-//
-//	// Enable Argus-powered hot reload
-//	if err := manager.EnableDynamicConfiguration("config.json", DefaultDynamicConfigOptions()); err != nil {
-//		log.Printf("Hot reload disabled: %v", err)
-//	} else {
-//		log.Println("✅ Ultra-fast Argus hot reload enabled!")
-//	}
-//
-//	defer manager.DisableDynamicConfiguration() // Clean shutdown
-func (m *Manager[Req, Resp]) EnableDynamicConfiguration(configPath string, options DynamicConfigOptions) error {
-	if m.configWatcher != nil {
-		return fmt.Errorf("dynamic configuration is already enabled")
-	}
-
-	watcher, err := NewConfigWatcher(m, configPath, options, m.logger)
+// recordObservabilityResult records success metrics and tracing information
+func (m *Manager[Req, Resp]) recordObservabilityResult(pluginName string, latency time.Duration, err error, span Span, execCtx ExecutionContext) {
 	if err != nil {
-		return fmt.Errorf("failed to create config watcher: %w", err)
+		// Error case is already handled by recordObservabilityError
+		return
 	}
 
-	ctx := context.Background()
-	if err := watcher.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start config watcher: %w", err)
+	// Metrics are now handled by ObservabilityManager in recordObservabilityEnd
+
+	// Set span success status (keep tracing logic)
+	if span != nil {
+		span.SetStatus(SpanStatusOK, "success")
+		span.SetAttribute("success", true)
+		span.SetAttribute("latency_ns", latency.Nanoseconds())
 	}
 
-	m.configWatcher = watcher
-	m.logger.Info("Argus dynamic configuration enabled",
-		"config_path", configPath,
-		"strategy", options.ReloadStrategy,
-		"poll_interval", options.PollInterval)
-
-	return nil
-}
-
-// DisableDynamicConfiguration stops Argus-powered hot reload
-func (m *Manager[Req, Resp]) DisableDynamicConfiguration() error {
-	if m.configWatcher == nil {
-		return fmt.Errorf("dynamic configuration is not enabled")
-	}
-
-	if err := m.configWatcher.Stop(); err != nil {
-		return fmt.Errorf("failed to stop config watcher: %w", err)
-	}
-
-	m.configWatcher = nil
-	m.logger.Info("Argus dynamic configuration disabled")
-	return nil
-}
-
-// IsDynamicConfigurationEnabled returns true if Argus hot reload is active
-func (m *Manager[Req, Resp]) IsDynamicConfigurationEnabled() bool {
-	return m.configWatcher != nil && m.configWatcher.IsRunning()
-}
-
-// GetDynamicConfigurationStats returns Argus watcher performance statistics
-func (m *Manager[Req, Resp]) GetDynamicConfigurationStats() *argus.CacheStats {
-	if m.configWatcher == nil {
-		return nil
-	}
-	stats := m.configWatcher.GetWatcherStats()
-	return &stats
-}
-
-// Health implements PluginManager.Health
-func (m *Manager[Req, Resp]) Health() map[string]HealthStatus {
-	return m.ListPlugins()
-}
-
-// Shutdown implements PluginManager.Shutdown
-func (m *Manager[Req, Resp]) Shutdown(ctx context.Context) error {
-	if !m.shutdown.CompareAndSwap(false, true) {
-		return errors.New("manager already shut down")
-	}
-
-	m.logger.Info("Shutting down plugin manager")
-
-	// Stop watchers and loaders
-	m.stopWatchersAndLoaders()
-
-	// Stop health checkers
-	m.stopHealthCheckers()
-
-	// Wait for graceful shutdown or timeout
-	m.waitForShutdown(ctx)
-
-	// Close all plugins
-	m.closeAllPlugins()
-
-	m.logger.Info("Plugin manager shutdown complete")
-	return nil
-}
-
-// stopWatchersAndLoaders stops config watchers and dynamic loaders
-func (m *Manager[Req, Resp]) stopWatchersAndLoaders() {
-	// Stop Argus config watcher first
-	if m.configWatcher != nil {
-		if err := m.configWatcher.Stop(); err != nil {
-			m.logger.Warn("Failed to stop config watcher", "error", err)
-		}
-	}
-
-	// Stop dynamic loader
-	if m.dynamicLoader != nil {
-		if err := m.dynamicLoader.Close(); err != nil {
-			m.logger.Warn("Failed to stop dynamic loader", "error", err)
-		}
+	// Log success if enabled
+	if m.observabilityManager.IsLoggingEnabled() {
+		m.logger.Debug("Plugin execution succeeded",
+			"plugin", pluginName,
+			"latency", latency,
+			"request_id", execCtx.RequestID)
 	}
 }
 
-// stopHealthCheckers stops all health checkers
-func (m *Manager[Req, Resp]) stopHealthCheckers() {
-	m.mu.Lock()
-	for _, checker := range m.healthCheckers {
-		checker.Stop()
-	}
-	m.mu.Unlock()
-}
-
-// waitForShutdown waits for health monitoring goroutines to finish or timeout
-func (m *Manager[Req, Resp]) waitForShutdown(ctx context.Context) {
-	done := make(chan struct{})
-	go func() {
-		m.wg.Wait()
-		close(done)
-	}()
-
-	// Wait for graceful shutdown or timeout
-	select {
-	case <-done:
-		m.logger.Info("All health monitors stopped")
-	case <-ctx.Done():
-		m.logger.Warn("Shutdown timeout reached, forcing shutdown")
-	}
-}
-
-// closeAllPlugins closes all registered plugins
-func (m *Manager[Req, Resp]) closeAllPlugins() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for name, plugin := range m.plugins {
-		if err := plugin.Close(); err != nil {
-			m.logger.Warn("Error closing plugin during shutdown",
-				"plugin", name, "error", err)
-		}
-	}
-	m.plugins = make(map[string]Plugin[Req, Resp])
-}
-
-// RegisterFactory registers a plugin factory for a specific plugin type
-func (m *Manager[Req, Resp]) RegisterFactory(pluginType string, factory PluginFactory[Req, Resp]) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if _, exists := m.factories[pluginType]; exists {
-		return fmt.Errorf("factory for plugin type %s already registered", pluginType)
-	}
-
-	m.factories[pluginType] = factory
-	return nil
-}
-
-// GetFactory retrieves a plugin factory by type
-func (m *Manager[Req, Resp]) GetFactory(pluginType string) (PluginFactory[Req, Resp], error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	factory, exists := m.factories[pluginType]
-	if !exists {
-		return nil, fmt.Errorf("no factory registered for plugin type: %s", pluginType)
-	}
-
-	return factory, nil
-}
-
-// GetMetrics returns current operational metrics
-func (m *Manager[Req, Resp]) GetMetrics() ManagerMetrics {
-	return ManagerMetrics{
-		RequestsTotal:       atomic.Int64{},
-		RequestsSuccess:     atomic.Int64{},
-		RequestsFailure:     atomic.Int64{},
-		RequestDuration:     atomic.Int64{},
-		CircuitBreakerTrips: atomic.Int64{},
-		HealthCheckFailures: atomic.Int64{},
-	}
-}
-
-// ConfigureObservability configures comprehensive observability for the manager
-func (m *Manager[Req, Resp]) ConfigureObservability(config ObservabilityConfig) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.observabilityConfig = config
-	m.metricsCollector = config.MetricsCollector
-	m.tracingProvider = config.TracingProvider
-
-	// Create enhanced metrics if available
-	if enhancedCollector, ok := config.MetricsCollector.(EnhancedMetricsCollector); ok {
-		m.commonMetrics = CreateCommonPluginMetrics(enhancedCollector)
-	}
-
-	m.logger.Info("Observability configured",
-		"metrics_enabled", config.MetricsEnabled,
-		"tracing_enabled", config.TracingEnabled,
-		"logging_enabled", config.LoggingEnabled)
-
-	return nil
-}
+// Configuration Management Methods are now implemented in manager_config.go
+// Health Monitoring Methods are now implemented in manager_health.go
+// Plugin Registry Management Methods are now implemented in manager_registry.go
+// Plugin Execution Methods are now implemented in manager_execution.go
+// Lifecycle Management Methods are now implemented in manager_lifecycle.go
 
 // GetObservabilityConfig returns current observability configuration
 func (m *Manager[Req, Resp]) GetObservabilityConfig() ObservabilityConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.observabilityConfig
-}
-
-// CreateObservableManager creates an ObservableManager from this Manager
-func (m *Manager[Req, Resp]) CreateObservableManager() *ObservableManager[Req, Resp] {
-	return NewObservableManager(m, m.observabilityConfig)
 }
 
 // GetObservabilityMetrics returns comprehensive observability metrics from the manager
@@ -861,15 +355,62 @@ func (m *Manager[Req, Resp]) GetObservabilityMetrics() map[string]interface{} {
 		"health_check_failures": managerMetrics.HealthCheckFailures.Load(),
 	}
 
+	// Add runtime observability metrics (integrated from ObservableManager)
+	metrics["global"] = map[string]interface{}{
+		"total_requests":  m.totalRequests.Load(),
+		"total_errors":    m.totalErrors.Load(),
+		"active_requests": m.activeRequests.Load(),
+		"start_time":      m.startTime,
+		"uptime_seconds":  time.Since(m.startTime).Seconds(),
+	}
+
+	// Add plugin-specific detailed metrics
+	m.metricsMu.RLock()
+	pluginMetrics := make(map[string]interface{})
+	for pluginName, metrics := range m.pluginMetrics {
+		totalRequests := metrics.TotalRequests.Load()
+		successfulRequests := metrics.SuccessfulRequests.Load()
+		failedRequests := metrics.FailedRequests.Load()
+
+		var successRate float64
+		if totalRequests > 0 {
+			successRate = float64(successfulRequests) / float64(totalRequests) * 100.0
+		}
+
+		pluginMetrics[pluginName] = map[string]interface{}{
+			"total_requests":        totalRequests,
+			"successful_requests":   successfulRequests,
+			"failed_requests":       failedRequests,
+			"active_requests":       metrics.ActiveRequests.Load(),
+			"success_rate":          successRate,
+			"total_latency_ns":      metrics.TotalLatency.Load(),
+			"min_latency_ns":        metrics.MinLatency.Load(),
+			"max_latency_ns":        metrics.MaxLatency.Load(),
+			"avg_latency_ns":        metrics.AvgLatency.Load(),
+			"timeout_errors":        metrics.TimeoutErrors.Load(),
+			"connection_errors":     metrics.ConnectionErrors.Load(),
+			"auth_errors":           metrics.AuthErrors.Load(),
+			"other_errors":          metrics.OtherErrors.Load(),
+			"circuit_breaker_trips": metrics.CircuitBreakerTrips.Load(),
+			"circuit_breaker_state": metrics.CircuitBreakerState.Load().(string),
+			"health_check_total":    metrics.HealthCheckTotal.Load(),
+			"health_check_failed":   metrics.HealthCheckFailed.Load(),
+			"last_health_check":     metrics.LastHealthCheck.Load(),
+			"health_status":         metrics.HealthStatus.Load().(string),
+		}
+	}
+	m.metricsMu.RUnlock()
+	metrics["plugins"] = pluginMetrics
+
 	// Get metrics from collector if available
 	if m.metricsCollector != nil {
 		metrics["collector"] = m.metricsCollector.GetMetrics()
 	}
 
-	// Get enhanced metrics if available
+	// Get Prometheus metrics if available
 	if m.commonMetrics != nil && m.observabilityConfig.MetricsCollector != nil {
-		if enhancedCollector, ok := m.observabilityConfig.MetricsCollector.(EnhancedMetricsCollector); ok {
-			metrics["prometheus"] = enhancedCollector.GetPrometheusMetrics()
+		if prometheusMetrics := m.observabilityConfig.MetricsCollector.GetPrometheusMetrics(); prometheusMetrics != nil {
+			metrics["prometheus"] = prometheusMetrics
 		}
 	}
 
@@ -899,16 +440,10 @@ func (m *Manager[Req, Resp]) EnableObservability() error {
 	return m.ConfigureObservability(config)
 }
 
-// EnableEnhancedObservability enables observability with enhanced metrics collector
-func (m *Manager[Req, Resp]) EnableEnhancedObservability() error {
-	config := EnhancedObservabilityConfig()
-	return m.ConfigureObservability(config)
-}
-
 // EnableObservabilityWithTracing enables observability with distributed tracing
 func (m *Manager[Req, Resp]) EnableObservabilityWithTracing(tracingProvider TracingProvider) error {
-	config := EnhancedObservabilityConfig()
-	config.TracingEnabled = true
+	config := DefaultObservabilityConfig()
+	config.Level = ObservabilityStandard // Enable tracing
 	config.TracingProvider = tracingProvider
 	return m.ConfigureObservability(config)
 }
@@ -919,38 +454,25 @@ func (m *Manager[Req, Resp]) GetObservabilityStatus() map[string]interface{} {
 	defer m.mu.RUnlock()
 
 	return map[string]interface{}{
-		"metrics_enabled":     m.observabilityConfig.MetricsEnabled,
-		"tracing_enabled":     m.observabilityConfig.TracingEnabled,
-		"logging_enabled":     m.observabilityConfig.LoggingEnabled,
+		"observability_level": string(m.observabilityConfig.Level),
+		"metrics_enabled":     m.observabilityConfig.IsMetricsEnabled(),
+		"tracing_enabled":     m.observabilityConfig.IsTracingEnabled(),
+		"logging_enabled":     m.observabilityConfig.IsLoggingEnabled(),
 		"metrics_prefix":      m.observabilityConfig.MetricsPrefix,
 		"tracing_sample_rate": m.observabilityConfig.TracingSampleRate,
 		"log_level":           m.observabilityConfig.LogLevel,
-		"structured_logging":  m.observabilityConfig.StructuredLogging,
-		"health_metrics":      m.observabilityConfig.HealthMetrics,
-		"performance_metrics": m.observabilityConfig.PerformanceMetrics,
-		"error_metrics":       m.observabilityConfig.ErrorMetrics,
+		"structured_logging":  m.observabilityConfig.IsStructuredLoggingEnabled(),
+		"health_metrics":      m.observabilityConfig.IsHealthMetricsEnabled(),
+		"performance_metrics": m.observabilityConfig.IsPerformanceMetricsEnabled(),
+		"error_metrics":       m.observabilityConfig.IsErrorMetricsEnabled(),
 		"has_common_metrics":  m.commonMetrics != nil,
 		"has_tracing":         m.tracingProvider != nil,
 	}
 }
 
-// recordObservabilityStart tracks the start of a request for observability
-func (m *Manager[Req, Resp]) recordObservabilityStart(pluginName string) {
-	if m.observabilityConfig.MetricsEnabled && m.commonMetrics != nil {
-		m.commonMetrics.IncrementActiveRequests(pluginName)
-	}
-}
-
-// recordObservabilityEnd tracks the end of a request for observability
-func (m *Manager[Req, Resp]) recordObservabilityEnd(pluginName string) {
-	if m.observabilityConfig.MetricsEnabled && m.commonMetrics != nil {
-		m.commonMetrics.DecrementActiveRequests(pluginName)
-	}
-}
-
 // setupTracing initializes distributed tracing if enabled
 func (m *Manager[Req, Resp]) setupTracing(ctx context.Context, pluginName string, execCtx ExecutionContext) (context.Context, Span) {
-	if !m.observabilityConfig.TracingEnabled || m.tracingProvider == nil {
+	if !m.observabilityConfig.IsTracingEnabled() || m.tracingProvider == nil {
 		return ctx, nil
 	}
 
@@ -972,246 +494,6 @@ func (m *Manager[Req, Resp]) injectTracingHeaders(ctx context.Context, execCtx *
 		tracingHeaders := m.tracingProvider.InjectContext(ctx)
 		for k, v := range tracingHeaders {
 			execCtx.Headers[k] = v
-		}
-	}
-}
-
-// recordObservabilityError records error metrics and tracing information
-func (m *Manager[Req, Resp]) recordObservabilityError(pluginName string, startTime time.Time, err error, span Span) {
-	latency := time.Since(startTime)
-
-	// Record metrics
-	if m.observabilityConfig.MetricsEnabled && m.commonMetrics != nil {
-		m.commonMetrics.RecordRequest(pluginName, latency, err)
-	}
-
-	// Record to metrics collector
-	if m.observabilityConfig.MetricsEnabled && m.metricsCollector != nil {
-		m.recordToMetricsCollector(pluginName, latency, err)
-	}
-
-	// Set span status
-	if span != nil {
-		span.SetStatus(SpanStatusError, err.Error())
-		span.SetAttribute("error", true)
-		span.SetAttribute("error.message", err.Error())
-	}
-
-	// Log error
-	if m.observabilityConfig.LoggingEnabled {
-		m.logger.Warn("Plugin execution failed",
-			"plugin", pluginName,
-			"latency", latency,
-			"error", err.Error())
-	}
-}
-
-// recordObservabilityResult records successful execution metrics
-func (m *Manager[Req, Resp]) recordObservabilityResult(pluginName string, latency time.Duration, err error, span Span, execCtx ExecutionContext) {
-	if err != nil {
-		return // Already handled in recordObservabilityError
-	}
-
-	// Record success metrics
-	if m.observabilityConfig.MetricsEnabled && m.commonMetrics != nil {
-		m.commonMetrics.RecordRequest(pluginName, latency, nil)
-	}
-
-	// Record to metrics collector
-	if m.observabilityConfig.MetricsEnabled && m.metricsCollector != nil {
-		m.recordToMetricsCollector(pluginName, latency, nil)
-	}
-
-	// Set span status
-	if span != nil {
-		span.SetStatus(SpanStatusOK, "success")
-	}
-
-	// Log success
-	if m.observabilityConfig.LoggingEnabled {
-		m.logger.Debug("Plugin execution completed",
-			"plugin", pluginName,
-			"request_id", execCtx.RequestID,
-			"latency", latency)
-	}
-}
-
-// recordToMetricsCollector records metrics to the configured collector
-func (m *Manager[Req, Resp]) recordToMetricsCollector(pluginName string, latency time.Duration, err error) {
-	labels := map[string]string{
-		"plugin_name": pluginName,
-	}
-
-	// Record request counter
-	m.metricsCollector.IncrementCounter(
-		m.observabilityConfig.MetricsPrefix+"_requests_total",
-		labels,
-		1,
-	)
-
-	// Record latency histogram
-	m.metricsCollector.RecordHistogram(
-		m.observabilityConfig.MetricsPrefix+"_request_duration_seconds",
-		labels,
-		latency.Seconds(),
-	)
-
-	// Record error metrics if applicable
-	if err != nil {
-		errorLabels := make(map[string]string)
-		for k, v := range labels {
-			errorLabels[k] = v
-		}
-
-		// Categorize error type
-		switch {
-		case isTimeoutError(err):
-			errorLabels["error_type"] = "timeout"
-		case isConnectionError(err):
-			errorLabels["error_type"] = "connection"
-		case isAuthError(err):
-			errorLabels["error_type"] = "authentication"
-		default:
-			errorLabels["error_type"] = "other"
-		}
-
-		m.metricsCollector.IncrementCounter(
-			m.observabilityConfig.MetricsPrefix+"_errors_total",
-			errorLabels,
-			1,
-		)
-	}
-}
-
-// recordCircuitBreakerMetrics records circuit breaker state changes
-func (m *Manager[Req, Resp]) recordCircuitBreakerMetrics(pluginName string, state CircuitBreakerState) {
-	if m.observabilityConfig.MetricsEnabled && m.commonMetrics != nil {
-		var stateValue int
-		switch state {
-		case StateClosed:
-			stateValue = 0
-		case StateOpen:
-			stateValue = 1
-		case StateHalfOpen:
-			stateValue = 2
-		}
-		m.commonMetrics.SetCircuitBreakerState(pluginName, stateValue)
-	}
-}
-
-// recordHealthCheckMetrics records health check results
-func (m *Manager[Req, Resp]) recordHealthCheckMetrics(pluginName string, healthStatus HealthStatus, duration time.Duration) {
-	if !m.observabilityConfig.MetricsEnabled || m.metricsCollector == nil {
-		return
-	}
-
-	labels := map[string]string{
-		"plugin_name": pluginName,
-		"status":      healthStatus.Status.String(),
-	}
-
-	// Record health check counter
-	m.metricsCollector.IncrementCounter(
-		m.observabilityConfig.MetricsPrefix+"_health_checks_total",
-		labels,
-		1,
-	)
-
-	// Record health check duration
-	m.metricsCollector.RecordHistogram(
-		m.observabilityConfig.MetricsPrefix+"_health_check_duration_seconds",
-		labels,
-		duration.Seconds(),
-	)
-
-	// Record health check failures
-	if healthStatus.Status != StatusHealthy {
-		m.metrics.HealthCheckFailures.Add(1)
-
-		failureLabels := map[string]string{
-			"plugin_name": pluginName,
-			"reason":      healthStatus.Message,
-		}
-
-		m.metricsCollector.IncrementCounter(
-			m.observabilityConfig.MetricsPrefix+"_health_check_failures_total",
-			failureLabels,
-			1,
-		)
-	}
-
-	// Set health status gauge
-	var statusValue float64
-	switch healthStatus.Status {
-	case StatusHealthy:
-		statusValue = 1
-	case StatusDegraded:
-		statusValue = 0.5
-	case StatusUnhealthy:
-		statusValue = 0
-	case StatusOffline:
-		statusValue = -1
-	default:
-		statusValue = 0
-	}
-
-	m.metricsCollector.SetGauge(
-		m.observabilityConfig.MetricsPrefix+"_plugin_health_status",
-		map[string]string{"plugin_name": pluginName},
-		statusValue,
-	)
-}
-
-// monitorPluginHealth runs health checks for a specific plugin
-func (m *Manager[Req, Resp]) monitorPluginHealth(pluginName string) {
-	defer m.wg.Done()
-
-	m.mu.RLock()
-	checker, exists := m.healthCheckers[pluginName]
-	m.mu.RUnlock()
-
-	if !exists {
-		return
-	}
-
-	ticker := time.NewTicker(30 * time.Second) // TODO: use config
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if m.shutdown.Load() {
-				return
-			}
-
-			// Perform health check with timing
-			startTime := time.Now()
-			status := checker.Check()
-			duration := time.Since(startTime)
-
-			m.mu.Lock()
-			m.healthStatus[pluginName] = status
-			m.mu.Unlock()
-
-			// Record observability metrics
-			m.recordHealthCheckMetrics(pluginName, status, duration)
-
-			if status.Status != StatusHealthy {
-				m.metrics.HealthCheckFailures.Add(1)
-				m.logger.Warn("Plugin health check failed",
-					"plugin", pluginName,
-					"status", status.Status.String(),
-					"message", status.Message,
-					"duration", duration)
-			} else if m.observabilityConfig.LoggingEnabled {
-				m.logger.Debug("Plugin health check passed",
-					"plugin", pluginName,
-					"duration", duration,
-					"response_time", status.ResponseTime)
-			}
-
-		case <-checker.Done():
-			return
 		}
 	}
 }
@@ -1238,27 +520,6 @@ func pow(base, exp float64) float64 {
 	return result
 }
 
-func isRetryableError(err error) bool {
-	// TODO: Implement more sophisticated error classification
-	if err == nil {
-		return false
-	}
-
-	// For now, consider timeout and temporary errors as retryable
-	return errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, context.Canceled)
-}
-
-// GetActiveRequestCount returns the number of active requests for a plugin
-func (m *Manager[Req, Resp]) GetActiveRequestCount(pluginName string) int64 {
-	return m.requestTracker.GetActiveRequestCount(pluginName)
-}
-
-// GetAllActiveRequests returns a map of plugin names to active request counts
-func (m *Manager[Req, Resp]) GetAllActiveRequests() map[string]int64 {
-	return m.requestTracker.GetAllActiveRequests()
-}
-
 // DrainPlugin gracefully drains active requests for a specific plugin
 func (m *Manager[Req, Resp]) DrainPlugin(pluginName string, options DrainOptions) error {
 	m.logger.Info("Starting graceful drain for plugin",
@@ -1280,383 +541,6 @@ func (m *Manager[Req, Resp]) DrainPlugin(pluginName string, options DrainOptions
 	return m.requestTracker.GracefulDrain(pluginName, options)
 }
 
-// GracefulUnregister removes a plugin after draining all active requests
-func (m *Manager[Req, Resp]) GracefulUnregister(pluginName string, drainTimeout time.Duration) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// Dynamic Loading Methods are now implemented in manager_dynamic_loading.go
 
-	// Check if plugin exists
-	if _, exists := m.plugins[pluginName]; !exists {
-		return fmt.Errorf("plugin %s not found", pluginName)
-	}
-
-	// Perform graceful drain
-	drainOptions := DrainOptions{
-		DrainTimeout:            drainTimeout,
-		ForceCancelAfterTimeout: true, // Force cancel after timeout for unregister
-	}
-
-	if err := m.DrainPlugin(pluginName, drainOptions); err != nil {
-		if drainErr, ok := err.(*DrainTimeoutError); ok {
-			m.logger.Warn("Plugin drain timed out, forcing unregister",
-				"plugin", pluginName,
-				"canceledRequests", drainErr.CanceledRequests)
-		} else {
-			return fmt.Errorf("failed to drain plugin %s: %w", pluginName, err)
-		}
-	}
-
-	// Remove plugin components
-	delete(m.plugins, pluginName)
-	delete(m.breakers, pluginName)
-
-	if checker, exists := m.healthCheckers[pluginName]; exists {
-		checker.Stop()
-		delete(m.healthCheckers, pluginName)
-	}
-	delete(m.healthStatus, pluginName)
-
-	m.logger.Info("Plugin successfully unregistered after graceful drain", "plugin", pluginName)
-	return nil
-}
-
-// Dynamic Loading Methods
-
-// EnableDynamicLoading enables automatic loading of discovered plugins.
-//
-// When enabled, the manager will automatically discover and load compatible plugins
-// from configured sources. This includes filesystem scanning, network discovery,
-// and service registry integration.
-//
-// Parameters:
-//   - ctx: Context for cancellation and timeouts
-//
-// Returns error if dynamic loading cannot be enabled or is already active.
-func (m *Manager[Req, Resp]) EnableDynamicLoading(ctx context.Context) error {
-	if m.shutdown.Load() {
-		return errors.New("manager is shut down")
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if err := m.dynamicLoader.EnableAutoLoading(ctx); err != nil {
-		return fmt.Errorf("failed to enable dynamic loading: %w", err)
-	}
-
-	m.logger.Info("Dynamic loading enabled")
-	return nil
-}
-
-// DisableDynamicLoading disables automatic loading of discovered plugins.
-//
-// This stops the background discovery and loading processes. Already loaded
-// plugins remain active and are not affected by this operation.
-func (m *Manager[Req, Resp]) DisableDynamicLoading() error {
-	if m.shutdown.Load() {
-		return errors.New("manager is shut down")
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if err := m.dynamicLoader.DisableAutoLoading(); err != nil {
-		return fmt.Errorf("failed to disable dynamic loading: %w", err)
-	}
-
-	m.logger.Info("Dynamic loading disabled")
-	return nil
-}
-
-// ConfigureDiscovery configures the discovery engine with new settings.
-//
-// Note: Currently discovery configuration is set at initialization time.
-// Runtime reconfiguration will be implemented in a future version.
-// For now, this method returns the current discovery configuration.
-//
-// TODO: Implement runtime configuration updates for the discovery engine.
-func (m *Manager[Req, Resp]) ConfigureDiscovery(config ExtendedDiscoveryConfig) error {
-	if m.shutdown.Load() {
-		return errors.New("manager is shut down")
-	}
-
-	// For now, log the request but don't update config at runtime
-	m.logger.Info("Discovery configuration change requested (runtime updates not yet implemented)",
-		"enabled", config.Enabled,
-		"directories", len(config.Directories),
-		"patterns", len(config.Patterns))
-
-	return fmt.Errorf("runtime discovery configuration updates not yet implemented")
-}
-
-// LoadDiscoveredPlugin manually loads a specific discovered plugin.
-//
-// This method allows manual control over plugin loading, including dependency
-// resolution and version compatibility checking. The plugin must be available
-// in the discovery results.
-//
-// Parameters:
-//   - ctx: Context for cancellation and timeouts
-//   - pluginName: Name of the plugin to load from discovery results
-//
-// Returns error if plugin is not discovered, incompatible, or loading fails.
-func (m *Manager[Req, Resp]) LoadDiscoveredPlugin(ctx context.Context, pluginName string) error {
-	if m.shutdown.Load() {
-		return errors.New("manager is shut down")
-	}
-
-	if err := m.dynamicLoader.LoadDiscoveredPlugin(ctx, pluginName); err != nil {
-		return fmt.Errorf("failed to load discovered plugin %s: %w", pluginName, err)
-	}
-
-	m.logger.Info("Discovered plugin loaded successfully", "plugin", pluginName)
-	return nil
-}
-
-// UnloadDynamicPlugin unloads a dynamically loaded plugin.
-//
-// This method safely unloads a plugin that was loaded through the dynamic
-// loading system. It includes dependency checking and graceful shutdown.
-//
-// Parameters:
-//   - ctx: Context for cancellation and timeouts
-//   - pluginName: Name of the plugin to unload
-//   - force: Whether to force unload even if other plugins depend on it
-//
-// Returns error if plugin cannot be unloaded safely (unless forced).
-func (m *Manager[Req, Resp]) UnloadDynamicPlugin(ctx context.Context, pluginName string, force bool) error {
-	if m.shutdown.Load() {
-		return errors.New("manager is shut down")
-	}
-
-	if err := m.dynamicLoader.UnloadPlugin(ctx, pluginName, force); err != nil {
-		return fmt.Errorf("failed to unload dynamic plugin %s: %w", pluginName, err)
-	}
-
-	m.logger.Info("Dynamic plugin unloaded successfully",
-		"plugin", pluginName,
-		"forced", force)
-	return nil
-}
-
-// SetPluginCompatibilityRule sets version compatibility rules for a plugin.
-//
-// This method configures version constraints that will be checked when
-// loading plugins dynamically. Supports semantic versioning constraints
-// like "^1.0.0", "~1.2.0", or exact versions.
-//
-// Parameters:
-//   - pluginName: Name of the plugin to set constraint for
-//   - constraint: Semantic version constraint string
-func (m *Manager[Req, Resp]) SetPluginCompatibilityRule(pluginName, constraint string) {
-	if m.shutdown.Load() {
-		return
-	}
-
-	m.dynamicLoader.SetCompatibilityRule(pluginName, constraint)
-	m.logger.Debug("Plugin compatibility rule set",
-		"plugin", pluginName,
-		"constraint", constraint)
-}
-
-// GetDiscoveredPlugins returns the current list of discovered plugins.
-//
-// This method provides access to the discovery engine results, showing
-// all plugins that have been found but may not yet be loaded.
-//
-// Returns map of plugin names to discovery results.
-func (m *Manager[Req, Resp]) GetDiscoveredPlugins() map[string]*DiscoveryResult {
-	if m.shutdown.Load() {
-		return make(map[string]*DiscoveryResult)
-	}
-
-	return m.discoveryEngine.GetDiscoveredPlugins()
-}
-
-// GetDynamicLoadingStatus returns the loading status of all dynamic plugins.
-//
-// This method shows the current state of plugins in the dynamic loading
-// system, including their loading status and dependency relationships.
-//
-// Returns map of plugin names to their loading states.
-func (m *Manager[Req, Resp]) GetDynamicLoadingStatus() map[string]LoadingState {
-	if m.shutdown.Load() {
-		return make(map[string]LoadingState)
-	}
-
-	return m.dynamicLoader.GetLoadingStatus()
-}
-
-// GetDependencyGraph returns the current plugin dependency graph.
-//
-// This method provides access to the dependency relationships between
-// plugins, useful for understanding loading order and dependencies.
-//
-// Returns a copy of the current dependency graph.
-func (m *Manager[Req, Resp]) GetDependencyGraph() *DependencyGraph {
-	if m.shutdown.Load() {
-		return NewDependencyGraph()
-	}
-
-	return m.dynamicLoader.GetDependencyGraph()
-}
-
-// GetDynamicLoadingMetrics returns metrics for the dynamic loading system.
-//
-// This method provides operational metrics including load counts,
-// failures, and performance statistics for dynamic loading operations.
-//
-// Returns current dynamic loading metrics.
-func (m *Manager[Req, Resp]) GetDynamicLoadingMetrics() DynamicLoaderMetrics {
-	if m.shutdown.Load() {
-		return DynamicLoaderMetrics{}
-	}
-
-	return m.dynamicLoader.GetMetrics()
-}
-
-// Security Management Methods
-
-// EnablePluginSecurity enables the plugin security validator with the given configuration
-func (m *Manager[Req, Resp]) EnablePluginSecurity(config SecurityConfig) error {
-	if m.shutdown.Load() {
-		return errors.New("manager is shut down")
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.securityValidator == nil {
-		validator, err := NewSecurityValidator(config, m.logger)
-		if err != nil {
-			return fmt.Errorf("failed to create security validator: %w", err)
-		}
-		m.securityValidator = validator
-	} else {
-		if err := m.securityValidator.UpdateConfig(config); err != nil {
-			return fmt.Errorf("failed to update security config: %w", err)
-		}
-	}
-
-	if err := m.securityValidator.Enable(); err != nil {
-		return fmt.Errorf("failed to enable security validator: %w", err)
-	}
-
-	m.logger.Info("Plugin security enabled", "policy", config.Policy.String())
-	return nil
-}
-
-// DisablePluginSecurity disables the plugin security validator
-func (m *Manager[Req, Resp]) DisablePluginSecurity() error {
-	if m.shutdown.Load() {
-		return errors.New("manager is shut down")
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.securityValidator == nil {
-		return errors.New("security validator not initialized")
-	}
-
-	if err := m.securityValidator.Disable(); err != nil {
-		return fmt.Errorf("failed to disable security validator: %w", err)
-	}
-
-	m.logger.Info("Plugin security disabled")
-	return nil
-}
-
-// IsPluginSecurityEnabled returns whether plugin security is currently enabled
-func (m *Manager[Req, Resp]) IsPluginSecurityEnabled() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	return m.securityValidator != nil && m.securityValidator.IsEnabled()
-}
-
-// GetPluginSecurityStats returns current security validation statistics
-func (m *Manager[Req, Resp]) GetPluginSecurityStats() (SecurityStats, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.securityValidator == nil {
-		return SecurityStats{}, errors.New("security validator not initialized")
-	}
-
-	return m.securityValidator.GetStats(), nil
-}
-
-// GetPluginSecurityConfig returns the current security configuration
-func (m *Manager[Req, Resp]) GetPluginSecurityConfig() (SecurityConfig, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.securityValidator == nil {
-		return SecurityConfig{}, errors.New("security validator not initialized")
-	}
-
-	return m.securityValidator.GetConfig(), nil
-}
-
-// ReloadPluginWhitelist manually reloads the plugin whitelist from file
-func (m *Manager[Req, Resp]) ReloadPluginWhitelist() error {
-	if m.shutdown.Load() {
-		return errors.New("manager is shut down")
-	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.securityValidator == nil {
-		return errors.New("security validator not initialized")
-	}
-
-	if err := m.securityValidator.ReloadWhitelist(); err != nil {
-		return fmt.Errorf("failed to reload whitelist: %w", err)
-	}
-
-	m.logger.Info("Plugin whitelist reloaded successfully")
-	return nil
-}
-
-// GetPluginWhitelistInfo returns information about the current plugin whitelist
-func (m *Manager[Req, Resp]) GetPluginWhitelistInfo() (map[string]interface{}, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.securityValidator == nil {
-		return nil, errors.New("security validator not initialized")
-	}
-
-	return m.securityValidator.GetWhitelistInfo(), nil
-}
-
-// ValidatePluginSecurity manually validates a plugin against the security policy
-// This is useful for testing or pre-validation before actual registration
-func (m *Manager[Req, Resp]) ValidatePluginSecurity(config PluginConfig, pluginPath string) (*ValidationResult, error) {
-	if m.shutdown.Load() {
-		return nil, errors.New("manager is shut down")
-	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.securityValidator == nil {
-		return nil, errors.New("security validator not initialized")
-	}
-
-	return m.securityValidator.ValidatePlugin(config, pluginPath)
-}
-
-// GetArgusIntegrationInfo returns information about the Argus integration for security
-func (m *Manager[Req, Resp]) GetArgusIntegrationInfo() (map[string]interface{}, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.securityValidator == nil {
-		return nil, errors.New("security validator not initialized")
-	}
-
-	return m.securityValidator.GetArgusIntegrationInfo(), nil
-}
+// Security Management Methods are now implemented in manager_security.go

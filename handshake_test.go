@@ -35,7 +35,6 @@ func TestPluginTypeString(t *testing.T) {
 		expected   string
 	}{
 		{PluginTypeInvalid, "invalid"},
-		{PluginTypeNetRPC, "netrpc"},
 		{PluginTypeGRPC, "grpc"},
 	}
 

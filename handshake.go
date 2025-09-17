@@ -84,15 +84,12 @@ type PluginType int
 
 const (
 	PluginTypeInvalid PluginType = iota
-	PluginTypeNetRPC             // Legacy net/rpc protocol
 	PluginTypeGRPC               // gRPC protocol (preferred)
 )
 
 // String implements fmt.Stringer for PluginType.
 func (pt PluginType) String() string {
 	switch pt {
-	case PluginTypeNetRPC:
-		return "netrpc"
 	case PluginTypeGRPC:
 		return "grpc"
 	default:
@@ -259,8 +256,6 @@ func (hm *HandshakeManager) validateServerInfo() (string, int, error) {
 func (hm *HandshakeManager) validatePluginType() (PluginType, error) {
 	pluginTypeStr := os.Getenv("PLUGIN_TYPE")
 	switch strings.ToLower(pluginTypeStr) {
-	case "netrpc":
-		return PluginTypeNetRPC, nil
 	case "grpc":
 		return PluginTypeGRPC, nil
 	default:
