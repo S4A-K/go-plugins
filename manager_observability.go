@@ -463,105 +463,142 @@ func (om *ObservabilityManager) getHealthStatuses() map[string]interface{} {
 func (om *ObservabilityManager) generatePrometheusMetrics() []interface{} {
 	var metrics []interface{}
 
-	// Generate metric information with actual values from internal plugin metrics
 	om.metricsMu.RLock()
 	defer om.metricsMu.RUnlock()
 
 	for pluginName, pluginMetric := range om.pluginMetrics {
 		labels := map[string]string{"plugin_name": pluginName}
-
-		// Counter metrics - total requests
-		if om.commonMetrics != nil && om.commonMetrics.RequestsTotal != nil {
-			metrics = append(metrics, map[string]interface{}{
-				"Name":        "goplugins_requests_total",
-				"Type":        "counter",
-				"Description": "Counter metric for goplugins_requests_total",
-				"Value":       float64(pluginMetric.TotalRequests.Load()),
-				"Labels":      labels,
-				"Buckets":     []interface{}{},
-			})
-		}
-
-		// Counter metrics - successful requests
-		if om.commonMetrics != nil && om.commonMetrics.RequestsSuccess != nil {
-			metrics = append(metrics, map[string]interface{}{
-				"Name":        "goplugins_requests_success_total",
-				"Type":        "counter",
-				"Description": "Counter metric for successful plugin requests",
-				"Value":       float64(pluginMetric.SuccessfulRequests.Load()),
-				"Labels":      labels,
-				"Buckets":     []interface{}{},
-			})
-		}
-
-		// Counter metrics - failed requests
-		if om.commonMetrics != nil && om.commonMetrics.RequestsFailure != nil {
-			metrics = append(metrics, map[string]interface{}{
-				"Name":        "goplugins_requests_failure_total",
-				"Type":        "counter",
-				"Description": "Counter metric for failed plugin requests",
-				"Value":       float64(pluginMetric.FailedRequests.Load()),
-				"Labels":      labels,
-				"Buckets":     []interface{}{},
-			})
-		}
-
-		// Histogram metrics - request duration (use average from internal metrics)
-		if om.commonMetrics != nil && om.commonMetrics.RequestDuration != nil {
-			avgLatencyNs := pluginMetric.AvgLatency.Load()
-			avgLatencySeconds := float64(avgLatencyNs) / 1e9 // Convert nanoseconds to seconds
-
-			metrics = append(metrics, map[string]interface{}{
-				"Name":        "goplugins_request_duration_seconds",
-				"Type":        "histogram",
-				"Description": "Histogram metric for goplugins_request_duration_seconds",
-				"Value":       avgLatencySeconds,
-				"Labels":      labels,
-				"Buckets":     []interface{}{}, // Bucket data managed by histogram implementation
-			})
-		}
-
-		// Gauge metrics - active requests
-		if om.commonMetrics != nil && om.commonMetrics.ActiveRequests != nil {
-			metrics = append(metrics, map[string]interface{}{
-				"Name":        "plugin_active_requests",
-				"Type":        "gauge",
-				"Description": "Gauge metric for plugin_active_requests",
-				"Value":       float64(pluginMetric.ActiveRequests.Load()),
-				"Labels":      labels,
-				"Buckets":     []interface{}{},
-			})
-		}
-
-		// Gauge metrics - circuit breaker state
-		if om.commonMetrics != nil && om.commonMetrics.CircuitBreakerState != nil {
-			// Convert circuit breaker state string to numeric value
-			var stateValue float64
-			if state := pluginMetric.CircuitBreakerState.Load(); state != nil {
-				switch state.(string) {
-				case "closed":
-					stateValue = 0
-				case "open":
-					stateValue = 1
-				case "half-open":
-					stateValue = 2
-				default:
-					stateValue = 0 // Default to closed
-				}
-			}
-
-			metrics = append(metrics, map[string]interface{}{
-				"Name":        "plugin_circuit_breaker_state",
-				"Type":        "gauge",
-				"Description": "Gauge metric for plugin_circuit_breaker_state (0=closed, 1=open, 2=half-open)",
-				"Value":       stateValue,
-				"Labels":      labels,
-				"Buckets":     []interface{}{},
-			})
-		}
+		metrics = append(metrics, om.generatePluginMetrics(pluginMetric, labels)...)
 	}
 
 	return metrics
+}
+
+// generatePluginMetrics creates all metrics for a single plugin (complexity: 8)
+func (om *ObservabilityManager) generatePluginMetrics(pluginMetric *PluginObservabilityMetrics, labels map[string]string) []interface{} {
+	var metrics []interface{}
+
+	// Counter metrics
+	metrics = append(metrics, om.generateCounterMetrics(pluginMetric, labels)...)
+
+	// Histogram metrics
+	metrics = append(metrics, om.generateHistogramMetrics(pluginMetric, labels)...)
+
+	// Gauge metrics
+	metrics = append(metrics, om.generateGaugeMetrics(pluginMetric, labels)...)
+
+	return metrics
+}
+
+// generateCounterMetrics creates counter metrics (complexity: 4)
+func (om *ObservabilityManager) generateCounterMetrics(pluginMetric *PluginObservabilityMetrics, labels map[string]string) []interface{} {
+	var metrics []interface{}
+
+	if om.commonMetrics == nil {
+		return metrics
+	}
+
+	// Total requests
+	if om.commonMetrics.RequestsTotal != nil {
+		metrics = append(metrics, om.createMetric(
+			"goplugins_requests_total", "counter",
+			"Counter metric for goplugins_requests_total",
+			float64(pluginMetric.TotalRequests.Load()), labels))
+	}
+
+	// Successful requests
+	if om.commonMetrics.RequestsSuccess != nil {
+		metrics = append(metrics, om.createMetric(
+			"goplugins_requests_success_total", "counter",
+			"Counter metric for successful plugin requests",
+			float64(pluginMetric.SuccessfulRequests.Load()), labels))
+	}
+
+	// Failed requests
+	if om.commonMetrics.RequestsFailure != nil {
+		metrics = append(metrics, om.createMetric(
+			"goplugins_requests_failure_total", "counter",
+			"Counter metric for failed plugin requests",
+			float64(pluginMetric.FailedRequests.Load()), labels))
+	}
+
+	return metrics
+}
+
+// generateHistogramMetrics creates histogram metrics (complexity: 3)
+func (om *ObservabilityManager) generateHistogramMetrics(pluginMetric *PluginObservabilityMetrics, labels map[string]string) []interface{} {
+	var metrics []interface{}
+
+	if om.commonMetrics != nil && om.commonMetrics.RequestDuration != nil {
+		avgLatencyNs := pluginMetric.AvgLatency.Load()
+		avgLatencySeconds := float64(avgLatencyNs) / 1e9 // Convert nanoseconds to seconds
+
+		metrics = append(metrics, om.createMetric(
+			"goplugins_request_duration_seconds", "histogram",
+			"Histogram metric for goplugins_request_duration_seconds",
+			avgLatencySeconds, labels))
+	}
+
+	return metrics
+}
+
+// generateGaugeMetrics creates gauge metrics (complexity: 6)
+func (om *ObservabilityManager) generateGaugeMetrics(pluginMetric *PluginObservabilityMetrics, labels map[string]string) []interface{} {
+	var metrics []interface{}
+
+	if om.commonMetrics == nil {
+		return metrics
+	}
+
+	// Active requests
+	if om.commonMetrics.ActiveRequests != nil {
+		metrics = append(metrics, om.createMetric(
+			"plugin_active_requests", "gauge",
+			"Gauge metric for plugin_active_requests",
+			float64(pluginMetric.ActiveRequests.Load()), labels))
+	}
+
+	// Circuit breaker state
+	if om.commonMetrics.CircuitBreakerState != nil {
+		stateValue := om.getCircuitBreakerStateValue(pluginMetric)
+		metrics = append(metrics, om.createMetric(
+			"plugin_circuit_breaker_state", "gauge",
+			"Gauge metric for plugin_circuit_breaker_state (0=closed, 1=open, 2=half-open)",
+			stateValue, labels))
+	}
+
+	return metrics
+}
+
+// getCircuitBreakerStateValue converts circuit breaker state to numeric value (complexity: 4)
+func (om *ObservabilityManager) getCircuitBreakerStateValue(pluginMetric *PluginObservabilityMetrics) float64 {
+	state := pluginMetric.CircuitBreakerState.Load()
+	if state == nil {
+		return 0 // Default to closed
+	}
+
+	switch state.(string) {
+	case "closed":
+		return 0
+	case "open":
+		return 1
+	case "half-open":
+		return 2
+	default:
+		return 0 // Default to closed
+	}
+}
+
+// createMetric creates a standardized metric map (complexity: 1)
+func (om *ObservabilityManager) createMetric(name, metricType, description string, value float64, labels map[string]string) map[string]interface{} {
+	return map[string]interface{}{
+		"Name":        name,
+		"Type":        metricType,
+		"Description": description,
+		"Value":       value,
+		"Labels":      labels,
+		"Buckets":     []interface{}{},
+	}
 }
 
 // GetObservabilityConfig returns the current observability configuration.

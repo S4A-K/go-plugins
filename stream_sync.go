@@ -262,88 +262,119 @@ func (ss *StreamSyncer) syncStream(streamReader *StreamReader) {
 
 	ss.logger.Debug("Starting stream sync loop", "stream_type", streamReader.streamType.String())
 
-	// Get appropriate output writer
-	var writer io.Writer
-	switch streamReader.streamType {
-	case StreamStdout:
-		writer = ss.stdoutWriter
-	case StreamStderr:
-		writer = ss.stderrWriter
-	default:
-		ss.logger.Error("Unknown stream type", "stream_type", streamReader.streamType)
-		return
+	writer := ss.getOutputWriter(streamReader.streamType)
+	if writer == nil {
+		return // Error already logged
 	}
 
-	// Sync loop
+	// Main sync loop
 	for {
-		select {
-		case <-ss.ctx.Done():
-			ss.logger.Debug("Stream sync stopped by context", "stream_type", streamReader.streamType.String())
+		if ss.shouldStop() {
 			return
-		default:
-			// Continue reading
 		}
 
 		if ss.config.LineBuffered {
-			// Line-buffered reading
-			if !streamReader.scanner.Scan() {
-				// Check for error or EOF
-				if err := streamReader.scanner.Err(); err != nil {
-					ss.logger.Error("Stream scan error",
-						"stream_type", streamReader.streamType.String(),
-						"error", err)
-				}
-				ss.logger.Debug("Stream ended", "stream_type", streamReader.streamType.String())
-				return
-			}
-
-			line := streamReader.scanner.Text()
-			streamReader.linesRead++
-			streamReader.bytesRead += int64(len(line))
-
-			// Format and write line
-			formattedLine := ss.formatLine(line, streamReader.streamType)
-			if _, err := fmt.Fprintln(writer, formattedLine); err != nil {
-				ss.logger.Error("Failed to write to output stream",
-					"stream_type", streamReader.streamType.String(),
-					"error", err)
+			if !ss.processLineBuffered(streamReader, writer) {
+				return // Stream ended or error
 			}
 		} else {
-			// Streaming mode - read in chunks and forward immediately
-			buffer := make([]byte, ss.config.BufferSize)
-			n, err := streamReader.reader.Read(buffer)
-
-			if err != nil {
-				if err != io.EOF {
-					ss.logger.Error("Stream read error",
-						"stream_type", streamReader.streamType.String(),
-						"error", err)
-				}
-				ss.logger.Debug("Stream ended", "stream_type", streamReader.streamType.String())
-				return
-			}
-
-			if n > 0 {
-				streamReader.bytesRead += int64(n)
-
-				// In streaming mode, optionally add timestamp/prefix per chunk
-				data := buffer[:n]
-				if ss.config.TimestampOutput || ss.config.PrefixOutput {
-					// Convert to string for formatting, then back to bytes
-					dataStr := string(data)
-					formattedStr := ss.formatStreamChunk(dataStr, streamReader.streamType)
-					data = []byte(formattedStr)
-				}
-
-				// Write directly to output without additional newlines
-				if _, err := writer.Write(data); err != nil {
-					ss.logger.Error("Failed to write to output stream",
-						"stream_type", streamReader.streamType.String(),
-						"error", err)
-				}
+			if !ss.processStreaming(streamReader, writer) {
+				return // Stream ended or error
 			}
 		}
 	}
+}
+
+// getOutputWriter returns the appropriate writer for the stream type (complexity: 3)
+func (ss *StreamSyncer) getOutputWriter(streamType StreamType) io.Writer {
+	switch streamType {
+	case StreamStdout:
+		return ss.stdoutWriter
+	case StreamStderr:
+		return ss.stderrWriter
+	default:
+		ss.logger.Error("Unknown stream type", "stream_type", streamType)
+		return nil
+	}
+}
+
+// shouldStop checks if the sync should stop (complexity: 2)
+func (ss *StreamSyncer) shouldStop() bool {
+	select {
+	case <-ss.ctx.Done():
+		ss.logger.Debug("Stream sync stopped by context")
+		return true
+	default:
+		return false
+	}
+}
+
+// processLineBuffered handles line-buffered reading (complexity: 4)
+func (ss *StreamSyncer) processLineBuffered(streamReader *StreamReader, writer io.Writer) bool {
+	if !streamReader.scanner.Scan() {
+		// Check for error or EOF
+		if err := streamReader.scanner.Err(); err != nil {
+			ss.logger.Error("Stream scan error",
+				"stream_type", streamReader.streamType.String(),
+				"error", err)
+		}
+		ss.logger.Debug("Stream ended", "stream_type", streamReader.streamType.String())
+		return false
+	}
+
+	line := streamReader.scanner.Text()
+	streamReader.linesRead++
+	streamReader.bytesRead += int64(len(line))
+
+	// Format and write line
+	formattedLine := ss.formatLine(line, streamReader.streamType)
+	if _, err := fmt.Fprintln(writer, formattedLine); err != nil {
+		ss.logger.Error("Failed to write to output stream",
+			"stream_type", streamReader.streamType.String(),
+			"error", err)
+	}
+	return true
+}
+
+// processStreaming handles streaming mode reading (complexity: 6)
+func (ss *StreamSyncer) processStreaming(streamReader *StreamReader, writer io.Writer) bool {
+	buffer := make([]byte, ss.config.BufferSize)
+	n, err := streamReader.reader.Read(buffer)
+
+	if err != nil {
+		if err != io.EOF {
+			ss.logger.Error("Stream read error",
+				"stream_type", streamReader.streamType.String(),
+				"error", err)
+		}
+		ss.logger.Debug("Stream ended", "stream_type", streamReader.streamType.String())
+		return false
+	}
+
+	if n > 0 {
+		streamReader.bytesRead += int64(n)
+		data := ss.formatStreamData(buffer[:n], streamReader.streamType)
+
+		// Write directly to output without additional newlines
+		if _, err := writer.Write(data); err != nil {
+			ss.logger.Error("Failed to write to output stream",
+				"stream_type", streamReader.streamType.String(),
+				"error", err)
+		}
+	}
+	return true
+}
+
+// formatStreamData formats streaming data (complexity: 3)
+func (ss *StreamSyncer) formatStreamData(data []byte, streamType StreamType) []byte {
+	if !ss.config.TimestampOutput && !ss.config.PrefixOutput {
+		return data
+	}
+
+	// Convert to string for formatting, then back to bytes
+	dataStr := string(data)
+	formattedStr := ss.formatStreamChunk(dataStr, streamType)
+	return []byte(formattedStr)
 }
 
 // formatLine formats a line according to configuration.
