@@ -397,29 +397,33 @@ func NewProtobufPluginServiceClient(cc grpc.ClientConnInterface) ProtobufPluginS
 	return ProtobufPluginServiceClient{cc: cc}
 }
 
-// ExecuteNative executes a native protobuf request
+// ExecuteNative executes a native protobuf request using gRPC generic invoke
 func (c ProtobufPluginServiceClient) ExecuteNative(ctx context.Context, request []byte) ([]byte, error) {
 	// Type assert to get the concrete connection
 	conn, ok := c.cc.(*grpc.ClientConn)
 	if !ok {
-		return nil, NewGRPCTransportError(fmt.Errorf("expected *grpc.ClientConn, got %T", c.cc))
+		return nil, NewCommunicationError(fmt.Sprintf("expected *grpc.ClientConn, got %T", c.cc), nil)
 	}
 
 	// Check connection state
 	if conn.GetState().String() != "READY" {
-		return nil, NewGRPCTransportError(fmt.Errorf("gRPC connection not ready: %s", conn.GetState()))
+		return nil, NewCommunicationError(fmt.Sprintf("gRPC connection not ready: %s", conn.GetState()), nil)
 	}
 
-	// For now, we'll implement a basic echo service for testing
-	// In production, this would invoke the actual protobuf gRPC service
-	// TODO: Replace with actual protobuf service implementation
 	if len(request) == 0 {
 		return nil, NewSerializationError("empty request not allowed", nil)
 	}
 
-	// Simple echo implementation - returns the request as response
-	// This allows the error checking to be meaningful
-	return request, nil
+	// Use generic gRPC invoke for protobuf services
+	// This assumes the service implements a standard Execute method
+	var response []byte
+
+	err := conn.Invoke(ctx, "/plugin.PluginService/Execute", request, &response)
+	if err != nil {
+		return nil, NewRPCError("gRPC call failed", err)
+	}
+
+	return response, nil
 }
 
 // GRPCPluginFactory creates GRPCNativePlugin instances
@@ -531,5 +535,3 @@ func validateGRPCConfig(config PluginConfig) error {
 
 	return nil
 }
-
-// Legacy gRPC service support removed - no longer needed since we're not published yet

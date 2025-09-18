@@ -72,11 +72,11 @@ func TestManager_DynamicLoadingSafety(t *testing.T) {
 			},
 		}
 		err := manager.ConfigureDiscovery(config)
-		// This is expected to return an error (not implemented yet)
-		if err == nil {
-			t.Error("ConfigureDiscovery should return error (not implemented)")
+		// ConfigureDiscovery is now implemented, should succeed with valid config
+		if err != nil {
+			t.Errorf("ConfigureDiscovery should succeed with valid config, got error: %v", err)
 		}
-		t.Logf("ConfigureDiscovery returned expected error: %v", err)
+		t.Logf("ConfigureDiscovery completed successfully")
 	})
 
 	t.Run("LoadDiscoveredPlugin", func(t *testing.T) {

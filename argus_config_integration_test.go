@@ -73,7 +73,9 @@ func TestLibraryConfigIntegration_CompleteWorkflow(t *testing.T) {
 			t.Fatalf("Failed to set %s: %v", key, err)
 		}
 		defer func(k string) {
-			_ = os.Unsetenv(k)
+			if err := os.Unsetenv(k); err != nil {
+				t.Logf("Warning: failed to unset env var %s: %v", k, err)
+			}
 		}(key)
 	}
 

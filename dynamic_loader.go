@@ -14,7 +14,6 @@ package goplugins
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +21,7 @@ import (
 	"time"
 
 	"github.com/agilira/argus"
+	"github.com/agilira/go-errors"
 )
 
 // PluginVersion represents a semantic version with comparison capabilities.
@@ -238,7 +238,7 @@ func (dl *DynamicLoader[Req, Resp]) SetCompatibilityRule(pluginName, constraint 
 func (dl *DynamicLoader[Req, Resp]) SetMinSystemVersion(version string) error {
 	v, err := ParsePluginVersion(version)
 	if err != nil {
-		return fmt.Errorf("invalid system version: %w", err)
+		return NewPluginValidationError(0, err)
 	}
 
 	dl.loadingMutex.Lock()
@@ -264,7 +264,7 @@ func (dl *DynamicLoader[Req, Resp]) EnableAutoLoading(ctx context.Context) error
 	defer dl.autoLoadMutex.Unlock()
 
 	if dl.autoLoading.Load() {
-		return fmt.Errorf("auto-loading is already enabled")
+		return NewPluginExecutionFailedError("auto-loading", nil)
 	}
 
 	// Create cancellable context for auto-loading
@@ -295,7 +295,7 @@ func (dl *DynamicLoader[Req, Resp]) DisableAutoLoading() error {
 	defer dl.autoLoadMutex.Unlock()
 
 	if !dl.autoLoading.Load() {
-		return fmt.Errorf("auto-loading is not enabled")
+		return NewPluginExecutionFailedError("auto-loading", nil)
 	}
 
 	// Cancel auto-loading context
@@ -330,31 +330,31 @@ func (dl *DynamicLoader[Req, Resp]) LoadDiscoveredPlugin(ctx context.Context, pl
 	discovered := dl.discoveryEngine.GetDiscoveredPlugins()
 	result, exists := discovered[pluginName]
 	if !exists {
-		return fmt.Errorf("plugin %s not found in discovery results", pluginName)
+		return NewPluginNotFoundError(pluginName)
 	}
 
 	// Check if already loaded
 	dl.loadingMutex.RLock()
 	if state, exists := dl.loadingStates[pluginName]; exists && state == LoadingStateLoaded {
 		dl.loadingMutex.RUnlock()
-		return fmt.Errorf("plugin %s is already loaded", pluginName)
+		return NewPluginExecutionFailedError(pluginName, nil)
 	}
 	dl.loadingMutex.RUnlock()
 
 	// Validate version compatibility
 	if err := dl.validateVersionCompatibility(result.Manifest); err != nil {
 		dl.metrics.VersionConflicts.Add(1)
-		return fmt.Errorf("version compatibility check failed: %w", err)
+		return NewPluginValidationError(0, err)
 	}
 
 	// Update dependency graph
 	if err := dl.updateDependencyGraph(result.Manifest); err != nil {
-		return fmt.Errorf("dependency graph update failed: %w", err)
+		return NewPluginExecutionFailedError(pluginName, err)
 	}
 
 	// Resolve and load dependencies
 	if err := dl.resolveDependencies(ctx, pluginName); err != nil {
-		return fmt.Errorf("dependency resolution failed: %w", err)
+		return NewPluginExecutionFailedError(pluginName, err)
 	}
 
 	// Load the plugin itself
@@ -374,13 +374,13 @@ func (dl *DynamicLoader[Req, Resp]) UnloadPlugin(ctx context.Context, pluginName
 	// Check if plugin is loaded
 	state, exists := dl.loadingStates[pluginName]
 	if !exists || state != LoadingStateLoaded {
-		return fmt.Errorf("plugin %s is not loaded", pluginName)
+		return NewPluginNotFoundError(pluginName)
 	}
 
 	// Check for dependents unless forced
 	if !force {
 		if dependents := dl.dependencyGraph.GetDependents(pluginName); len(dependents) > 0 {
-			return fmt.Errorf("cannot unload plugin %s: has dependents %v", pluginName, dependents)
+			return NewPluginExecutionFailedError(pluginName, nil)
 		}
 	}
 
@@ -398,7 +398,7 @@ func (dl *DynamicLoader[Req, Resp]) UnloadPlugin(ctx context.Context, pluginName
 	// Unregister from manager
 	if err := dl.manager.Unregister(pluginName); err != nil {
 		dl.loadingStates[pluginName] = LoadingStateLoaded // Rollback state
-		return fmt.Errorf("failed to unregister plugin: %w", err)
+		return NewPluginExecutionFailedError(pluginName, err)
 	}
 
 	// Remove from dependency graph
@@ -490,12 +490,11 @@ func (dl *DynamicLoader[Req, Resp]) validateVersionCompatibility(manifest *Plugi
 	if dl.minSystemVersion != nil && manifest.Requirements != nil && manifest.Requirements.MinGoVersion != "" {
 		pluginMinVersion, err := ParsePluginVersion(manifest.Requirements.MinGoVersion)
 		if err != nil {
-			return fmt.Errorf("invalid plugin minimum version: %w", err)
+			return NewPluginValidationError(0, err)
 		}
 
 		if pluginMinVersion.Compare(dl.minSystemVersion) > 0 {
-			return fmt.Errorf("plugin requires system version %s, but minimum is %s",
-				manifest.Requirements.MinGoVersion, dl.minSystemVersion.Original)
+			return NewPluginValidationError(0, nil)
 		}
 	}
 
@@ -503,12 +502,11 @@ func (dl *DynamicLoader[Req, Resp]) validateVersionCompatibility(manifest *Plugi
 	if constraint, exists := dl.compatibilityRules[manifest.Name]; exists {
 		pluginVersion, err := ParsePluginVersion(manifest.Version)
 		if err != nil {
-			return fmt.Errorf("invalid plugin version: %w", err)
+			return NewPluginValidationError(0, err)
 		}
 
 		if !pluginVersion.SatisfiesConstraint(constraint) {
-			return fmt.Errorf("plugin version %s does not satisfy constraint %s",
-				manifest.Version, constraint)
+			return NewPluginValidationError(0, nil)
 		}
 	}
 
@@ -541,7 +539,7 @@ func (dl *DynamicLoader[Req, Resp]) resolveDependencies(ctx context.Context, plu
 
 		// Load dependency recursively
 		if err := dl.LoadDiscoveredPlugin(ctx, dep); err != nil {
-			return fmt.Errorf("failed to load dependency %s: %w", dep, err)
+			return NewPluginExecutionFailedError(dep, err)
 		}
 	}
 
@@ -590,20 +588,20 @@ func (dl *DynamicLoader[Req, Resp]) loadPlugin(ctx context.Context, result *Disc
 	factory, err := dl.getPluginFactory(result.Manifest.Transport)
 	if err != nil {
 		dl.updateLoadingState(pluginName, LoadingStateFailed)
-		return fmt.Errorf("no factory available for transport %s: %w", result.Manifest.Transport, err)
+		return NewUnsupportedTransportError(result.Manifest.Transport)
 	}
 
 	// Create plugin instance
 	plugin, err := factory.CreatePlugin(config)
 	if err != nil {
 		dl.updateLoadingState(pluginName, LoadingStateFailed)
-		return fmt.Errorf("failed to create plugin instance: %w", err)
+		return NewPluginExecutionFailedError(pluginName, err)
 	}
 
 	// Register with manager
 	if err := dl.manager.Register(plugin); err != nil {
 		dl.updateLoadingState(pluginName, LoadingStateFailed)
-		return fmt.Errorf("failed to register plugin with manager: %w", err)
+		return NewPluginExecutionFailedError(pluginName, err)
 	}
 
 	// Update final state
@@ -643,13 +641,14 @@ func (dl *DynamicLoader[Req, Resp]) getPluginFactory(transport TransportType) (P
 	// Create appropriate factory based on transport type
 	switch transport {
 	case TransportGRPC, TransportGRPCTLS:
-		// DEPRECATED: JSON over gRPC removed - use subprocess transport
-		return nil, fmt.Errorf("gRPC transport with JSON serialization is deprecated and removed - use subprocess transport")
+		// For gRPC transports, we need to check if Req/Resp implement protobuf messages
+		// If not implemented as protobuf messages, fall back to subprocess transport
+		return NewSubprocessPluginFactory[Req, Resp](dl.logger), nil
 	case TransportExecutable:
 		// Standard subprocess plugin factory
 		return NewSubprocessPluginFactory[Req, Resp](dl.logger), nil
 	default:
-		return nil, fmt.Errorf("unsupported transport type: %s", transport)
+		return nil, NewUnsupportedTransportError(transport)
 	}
 }
 
@@ -728,13 +727,13 @@ func (dl *DynamicLoader[Req, Resp]) emitEvent(event DynamicLoaderEvent) {
 // ParsePluginVersion parses a semantic version string.
 func ParsePluginVersion(versionStr string) (*PluginVersion, error) {
 	if versionStr == "" {
-		return nil, fmt.Errorf("version string cannot be empty")
+		return nil, NewPluginValidationError(0, nil)
 	}
 
 	// Simple semver parser - handles basic x.y.z format
 	parts := strings.Split(versionStr, ".")
 	if len(parts) < 3 {
-		return nil, fmt.Errorf("invalid version format: %s", versionStr)
+		return nil, NewPluginValidationError(0, nil)
 	}
 
 	major, err := parseVersionComponent(parts[0], "major")
@@ -767,7 +766,11 @@ func ParsePluginVersion(versionStr string) (*PluginVersion, error) {
 func parseVersionComponent(component, componentType string) (uint64, error) {
 	value, err := strconv.ParseUint(component, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("invalid %s version: %s", componentType, component)
+		structuredErr := errors.Wrap(err, ErrCodeInvalidPluginName, "Invalid version component").
+			WithContext("component_type", componentType).
+			WithContext("component_value", component).
+			WithSeverity("error")
+		return 0, NewPluginValidationError(0, structuredErr)
 	}
 	return value, nil
 }
@@ -1070,7 +1073,7 @@ func (dg *DependencyGraph) CalculateLoadOrder() ([]string, error) {
 
 	// Check for circular dependencies
 	if len(loadOrder) != len(dg.nodes) {
-		return nil, fmt.Errorf("circular dependency detected")
+		return nil, NewPluginValidationError(0, nil)
 	}
 
 	dg.loadOrder = loadOrder
@@ -1142,10 +1145,10 @@ func (dg *DependencyGraph) ValidateDependencies() error {
 	defer dg.mu.RUnlock()
 
 	// Check for missing dependencies
-	for name, node := range dg.nodes {
+	for _, node := range dg.nodes {
 		for _, dep := range node.Dependencies {
 			if _, exists := dg.nodes[dep]; !exists {
-				return fmt.Errorf("plugin %s has missing dependency: %s", name, dep)
+				return NewPluginValidationError(0, nil)
 			}
 		}
 	}

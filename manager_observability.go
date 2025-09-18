@@ -174,89 +174,120 @@ func (om *ObservabilityManager) RecordObservabilityEnd(pluginName string, durati
 		return
 	}
 
+	success := err == nil
+
+	// Update request counters
+	om.updateRequestCounters(pluginName, success, err)
+
+	// Record in collectors
+	om.recordInCollectors(pluginName, duration, success)
+
+	// Record latency metrics
+	om.recordLatencyMetrics(pluginName, duration)
+}
+
+// updateRequestCounters updates active request counts and success/failure metrics
+func (om *ObservabilityManager) updateRequestCounters(pluginName string, success bool, err error) {
 	// Decrement active requests
 	om.activeRequests.Add(-1)
 
 	if metrics := om.GetPluginMetrics(pluginName); metrics != nil {
 		metrics.ActiveRequests.Add(-1)
-	}
 
-	// Record success/failure
-	success := err == nil
-	if success {
-		om.managerMetrics.RequestsSuccess.Add(1)
-		if metrics := om.GetPluginMetrics(pluginName); metrics != nil {
+		if success {
 			metrics.SuccessfulRequests.Add(1)
-		}
-	} else {
-		om.totalErrors.Add(1)
-		om.managerMetrics.RequestsFailure.Add(1)
-		if metrics := om.GetPluginMetrics(pluginName); metrics != nil {
+		} else {
 			metrics.FailedRequests.Add(1)
-			// Classify the error and increment appropriate counter
 			ClassifyError(err, metrics)
 		}
 	}
 
+	// Update manager-level counters
+	if success {
+		om.managerMetrics.RequestsSuccess.Add(1)
+	} else {
+		om.totalErrors.Add(1)
+		om.managerMetrics.RequestsFailure.Add(1)
+	}
+}
+
+// recordInCollectors records metrics in various collectors
+func (om *ObservabilityManager) recordInCollectors(pluginName string, duration time.Duration, success bool) {
 	// Record in common metrics (advanced collector)
 	if om.commonMetrics != nil {
 		om.commonMetrics.RecordRequest(pluginName, duration, success)
 		om.commonMetrics.DecrementActiveRequests(pluginName)
-	}
 
-	// Also record in basic collector for compatibility
-	if om.metricsCollector != nil {
-		labels := map[string]string{"plugin_name": pluginName}
-		om.metricsCollector.IncrementCounter("plugin_requests_total", labels, 1)
-
-		if success {
-			om.metricsCollector.IncrementCounter("plugin_requests_success_total", labels, 1)
-		} else {
-			om.metricsCollector.IncrementCounter("plugin_requests_failure_total", labels, 1)
-		}
-
-		om.metricsCollector.RecordHistogram("plugin_request_duration_seconds", labels, duration.Seconds())
-	}
-
-	// Record duration
-	durationNs := duration.Nanoseconds()
-	om.managerMetrics.RequestDuration.Store(durationNs)
-
-	if metrics := om.GetPluginMetrics(pluginName); metrics != nil {
-		metrics.TotalLatency.Add(durationNs)
-
-		// Update min/max latency
-		for {
-			current := metrics.MinLatency.Load()
-			if current == 0 || durationNs < current {
-				if metrics.MinLatency.CompareAndSwap(current, durationNs) {
-					break
-				}
-			} else {
-				break
-			}
-		}
-
-		for {
-			current := metrics.MaxLatency.Load()
-			if durationNs > current {
-				if metrics.MaxLatency.CompareAndSwap(current, durationNs) {
-					break
-				}
-			} else {
-				break
-			}
-		}
-	}
-
-	// Record in common metrics if available
-	if om.commonMetrics != nil {
 		if om.commonMetrics.ActiveRequests != nil {
 			om.commonMetrics.ActiveRequests.Add(-1, pluginName)
 		}
 
 		if om.commonMetrics.RequestDuration != nil {
 			om.commonMetrics.RequestDuration.Observe(duration.Seconds(), pluginName)
+		}
+	}
+
+	// Record in basic collector for compatibility
+	om.recordInBasicCollector(pluginName, duration, success)
+}
+
+// recordInBasicCollector records metrics in the basic metrics collector
+func (om *ObservabilityManager) recordInBasicCollector(pluginName string, duration time.Duration, success bool) {
+	if om.metricsCollector == nil {
+		return
+	}
+
+	labels := map[string]string{"plugin_name": pluginName}
+	om.metricsCollector.IncrementCounter("plugin_requests_total", labels, 1)
+
+	if success {
+		om.metricsCollector.IncrementCounter("plugin_requests_success_total", labels, 1)
+	} else {
+		om.metricsCollector.IncrementCounter("plugin_requests_failure_total", labels, 1)
+	}
+
+	om.metricsCollector.RecordHistogram("plugin_request_duration_seconds", labels, duration.Seconds())
+}
+
+// recordLatencyMetrics records duration and latency statistics
+func (om *ObservabilityManager) recordLatencyMetrics(pluginName string, duration time.Duration) {
+	durationNs := duration.Nanoseconds()
+	om.managerMetrics.RequestDuration.Store(durationNs)
+
+	metrics := om.GetPluginMetrics(pluginName)
+	if metrics == nil {
+		return
+	}
+
+	metrics.TotalLatency.Add(durationNs)
+	om.updateMinLatency(metrics, durationNs)
+	om.updateMaxLatency(metrics, durationNs)
+}
+
+// updateMinLatency atomically updates minimum latency
+func (om *ObservabilityManager) updateMinLatency(metrics *PluginObservabilityMetrics, durationNs int64) {
+	for {
+		current := metrics.MinLatency.Load()
+		if current == 0 || durationNs < current {
+			if metrics.MinLatency.CompareAndSwap(current, durationNs) {
+				break
+			}
+		} else {
+			break
+		}
+	}
+}
+
+// updateMaxLatency atomically updates maximum latency
+func (om *ObservabilityManager) updateMaxLatency(metrics *PluginObservabilityMetrics, durationNs int64) {
+	for {
+		current := metrics.MaxLatency.Load()
+		if durationNs > current {
+			if metrics.MaxLatency.CompareAndSwap(current, durationNs) {
+				break
+			}
+		} else {
+			break
 		}
 	}
 }
@@ -328,12 +359,26 @@ func (om *ObservabilityManager) GetObservabilityMetrics() map[string]interface{}
 			"auth_errors":           metrics.AuthErrors.Load(),
 			"other_errors":          metrics.OtherErrors.Load(),
 			"circuit_breaker_trips": metrics.CircuitBreakerTrips.Load(),
-			"circuit_breaker_state": metrics.CircuitBreakerState.Load().(string),
-			"health_check_total":    metrics.HealthCheckTotal.Load(),
-			"health_check_failed":   metrics.HealthCheckFailed.Load(),
-			"last_health_check":     metrics.LastHealthCheck.Load(),
-			"health_status":         metrics.HealthStatus.Load().(string),
-			"success_rate":          om.calculateSuccessRate(metrics),
+			"circuit_breaker_state": func() string {
+				if val := metrics.CircuitBreakerState.Load(); val != nil {
+					if str, ok := val.(string); ok {
+						return str
+					}
+				}
+				return "unknown"
+			}(),
+			"health_check_total":  metrics.HealthCheckTotal.Load(),
+			"health_check_failed": metrics.HealthCheckFailed.Load(),
+			"last_health_check":   metrics.LastHealthCheck.Load(),
+			"health_status": func() string {
+				if val := metrics.HealthStatus.Load(); val != nil {
+					if str, ok := val.(string); ok {
+						return str
+					}
+				}
+				return "unknown"
+			}(),
+			"success_rate": om.calculateSuccessRate(metrics),
 		}
 	}
 
@@ -377,7 +422,15 @@ func (om *ObservabilityManager) getCircuitBreakerStates() map[string]string {
 	states := make(map[string]string)
 
 	for pluginName, metrics := range om.pluginMetrics {
-		states[pluginName] = metrics.CircuitBreakerState.Load().(string)
+		if val := metrics.CircuitBreakerState.Load(); val != nil {
+			if str, ok := val.(string); ok {
+				states[pluginName] = str
+			} else {
+				states[pluginName] = "unknown"
+			}
+		} else {
+			states[pluginName] = "unknown"
+		}
 	}
 
 	return states
@@ -388,8 +441,15 @@ func (om *ObservabilityManager) getHealthStatuses() map[string]interface{} {
 	statuses := make(map[string]interface{})
 
 	for pluginName, metrics := range om.pluginMetrics {
+		healthStatus := "unknown"
+		if val := metrics.HealthStatus.Load(); val != nil {
+			if str, ok := val.(string); ok {
+				healthStatus = str
+			}
+		}
+
 		statuses[pluginName] = map[string]interface{}{
-			"status":       metrics.HealthStatus.Load().(string),
+			"status":       healthStatus,
 			"last_check":   time.Unix(0, metrics.LastHealthCheck.Load()),
 			"check_total":  metrics.HealthCheckTotal.Load(),
 			"check_failed": metrics.HealthCheckFailed.Load(),
@@ -403,53 +463,98 @@ func (om *ObservabilityManager) getHealthStatuses() map[string]interface{} {
 func (om *ObservabilityManager) generatePrometheusMetrics() []interface{} {
 	var metrics []interface{}
 
-	// Generate basic metric information without trying to access metric values
-	// since the metric interfaces don't provide direct access to current values
-	for pluginName := range om.pluginMetrics {
+	// Generate metric information with actual values from internal plugin metrics
+	om.metricsMu.RLock()
+	defer om.metricsMu.RUnlock()
+
+	for pluginName, pluginMetric := range om.pluginMetrics {
 		labels := map[string]string{"plugin_name": pluginName}
 
-		// Counter metrics
+		// Counter metrics - total requests
 		if om.commonMetrics != nil && om.commonMetrics.RequestsTotal != nil {
 			metrics = append(metrics, map[string]interface{}{
 				"Name":        "goplugins_requests_total",
 				"Type":        "counter",
 				"Description": "Counter metric for goplugins_requests_total",
-				"Value":       float64(0), // Placeholder - actual value managed internally
+				"Value":       float64(pluginMetric.TotalRequests.Load()),
 				"Labels":      labels,
 				"Buckets":     []interface{}{},
 			})
 		}
 
-		// Histogram metrics
+		// Counter metrics - successful requests
+		if om.commonMetrics != nil && om.commonMetrics.RequestsSuccess != nil {
+			metrics = append(metrics, map[string]interface{}{
+				"Name":        "goplugins_requests_success_total",
+				"Type":        "counter",
+				"Description": "Counter metric for successful plugin requests",
+				"Value":       float64(pluginMetric.SuccessfulRequests.Load()),
+				"Labels":      labels,
+				"Buckets":     []interface{}{},
+			})
+		}
+
+		// Counter metrics - failed requests
+		if om.commonMetrics != nil && om.commonMetrics.RequestsFailure != nil {
+			metrics = append(metrics, map[string]interface{}{
+				"Name":        "goplugins_requests_failure_total",
+				"Type":        "counter",
+				"Description": "Counter metric for failed plugin requests",
+				"Value":       float64(pluginMetric.FailedRequests.Load()),
+				"Labels":      labels,
+				"Buckets":     []interface{}{},
+			})
+		}
+
+		// Histogram metrics - request duration (use average from internal metrics)
 		if om.commonMetrics != nil && om.commonMetrics.RequestDuration != nil {
+			avgLatencyNs := pluginMetric.AvgLatency.Load()
+			avgLatencySeconds := float64(avgLatencyNs) / 1e9 // Convert nanoseconds to seconds
+
 			metrics = append(metrics, map[string]interface{}{
 				"Name":        "goplugins_request_duration_seconds",
 				"Type":        "histogram",
 				"Description": "Histogram metric for goplugins_request_duration_seconds",
-				"Value":       float64(0), // Placeholder - actual value managed internally
+				"Value":       avgLatencySeconds,
 				"Labels":      labels,
-				"Buckets":     []interface{}{},
+				"Buckets":     []interface{}{}, // Bucket data managed by histogram implementation
 			})
 		}
 
-		// Gauge metrics
+		// Gauge metrics - active requests
 		if om.commonMetrics != nil && om.commonMetrics.ActiveRequests != nil {
 			metrics = append(metrics, map[string]interface{}{
 				"Name":        "plugin_active_requests",
 				"Type":        "gauge",
 				"Description": "Gauge metric for plugin_active_requests",
-				"Value":       float64(0), // Placeholder - actual value managed internally
+				"Value":       float64(pluginMetric.ActiveRequests.Load()),
 				"Labels":      labels,
 				"Buckets":     []interface{}{},
 			})
 		}
 
+		// Gauge metrics - circuit breaker state
 		if om.commonMetrics != nil && om.commonMetrics.CircuitBreakerState != nil {
+			// Convert circuit breaker state string to numeric value
+			var stateValue float64
+			if state := pluginMetric.CircuitBreakerState.Load(); state != nil {
+				switch state.(string) {
+				case "closed":
+					stateValue = 0
+				case "open":
+					stateValue = 1
+				case "half-open":
+					stateValue = 2
+				default:
+					stateValue = 0 // Default to closed
+				}
+			}
+
 			metrics = append(metrics, map[string]interface{}{
 				"Name":        "plugin_circuit_breaker_state",
 				"Type":        "gauge",
-				"Description": "Gauge metric for plugin_circuit_breaker_state",
-				"Value":       float64(0), // Placeholder - actual value managed internally
+				"Description": "Gauge metric for plugin_circuit_breaker_state (0=closed, 1=open, 2=half-open)",
+				"Value":       stateValue,
 				"Labels":      labels,
 				"Buckets":     []interface{}{},
 			})
@@ -472,6 +577,52 @@ func (om *ObservabilityManager) IsMetricsEnabled() bool {
 // IsTracingEnabled returns whether tracing is enabled.
 func (om *ObservabilityManager) IsTracingEnabled() bool {
 	return om.config.IsTracingEnabled()
+}
+
+// RecordHealthCheckMetrics records health check metrics for a plugin.
+//
+// This method tracks health check results, durations, and status changes
+// providing comprehensive observability for plugin health monitoring.
+//
+// Parameters:
+//   - pluginName: Name of the plugin being health checked
+//   - status: Current health status result
+//   - duration: Time taken for the health check operation
+func (om *ObservabilityManager) RecordHealthCheckMetrics(pluginName string, status HealthStatus, duration time.Duration) {
+	if !om.IsMetricsEnabled() {
+		return
+	}
+
+	// Record health check execution time
+	om.recordLatencyMetrics(pluginName+"_health", duration)
+
+	// Record health check result in common metrics
+	if om.commonMetrics != nil {
+		isHealthy := status.Status == StatusHealthy
+		om.commonMetrics.RecordRequest(pluginName+"_health", duration, isHealthy)
+	}
+
+	// Record in basic collector for compatibility
+	om.recordInBasicCollector(pluginName+"_health", duration, status.Status == StatusHealthy)
+
+	// Update plugin-specific health check metrics if available
+	if pluginMetrics, exists := om.pluginMetrics[pluginName]; exists {
+		pluginMetrics.HealthCheckTotal.Add(1)
+		if status.Status != StatusHealthy {
+			pluginMetrics.HealthCheckFailed.Add(1)
+		}
+		pluginMetrics.LastHealthCheck.Store(status.LastCheck.UnixNano())
+		pluginMetrics.HealthStatus.Store(status.Status.String())
+	}
+
+	// Log health status change for observability
+	if om.config.IsLoggingEnabled() {
+		om.logger.Debug("Health check completed",
+			"plugin", pluginName,
+			"status", status.Status.String(),
+			"duration_ms", duration.Milliseconds(),
+			"message", status.Message)
+	}
 }
 
 // IsLoggingEnabled returns whether observability logging is enabled.

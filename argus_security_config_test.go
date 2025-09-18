@@ -172,7 +172,7 @@ func TestLibraryConfigWithSecurityConfig(t *testing.T) {
 	t.Logf("✅ Unified SecurityConfig integration test passed")
 }
 
-// TestSecurityConfigValidation tests the validateSecurityConfig function
+// TestSecurityConfigValidation tests the ConfigValidator.validateSecurityConstraints function
 func TestSecurityConfigValidation(t *testing.T) {
 	tempDir := t.TempDir()
 	manager := NewManager[string, string](nil)
@@ -300,7 +300,7 @@ func TestSecurityConfigValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := watcher.validateSecurityConfig(tt.config)
+			err := watcher.validator.validateSecurityConstraints(tt.config)
 
 			if tt.expectErr {
 				if err == nil {

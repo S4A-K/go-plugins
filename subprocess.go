@@ -13,9 +13,6 @@ package goplugins
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
-	"strings"
 	"sync"
 	"time"
 )
@@ -24,39 +21,35 @@ import (
 // This plugin type launches external executables as separate processes and
 // communicates with them via TCP connections.
 //
+// After refactoring, this class focuses on orchestration and delegates
+// specific responsibilities to dedicated components.
+//
 // Key features:
 //   - Direct process execution via exec.Command
 //   - TCP localhost IPC (not Unix sockets)
-//   - Process lifecycle management
-//   - Standard subprocess handshake protocol
+//   - Process lifecycle management via ProcessManager
+//   - Standard subprocess handshake protocol via LifecycleManager
+//   - Configuration parsing via ConfigParser
 //   - Automatic cleanup on shutdown
 type SubprocessPlugin[Req, Resp any] struct {
-	// Configuration
-	executablePath string
-	args           []string
-	env            []string
+	// Core components (after refactoring)
+	processManager   *ProcessManager
+	configParser     *ConfigParser
+	lifecycleManager *LifecycleManager
 
-	// Process management
-	cmd     *exec.Cmd
-	process *ProcessInfo
-	mutex   sync.RWMutex
-
-	// Protocol management
+	// Legacy components (maintained for compatibility)
 	handshakeManager *HandshakeManager
-	handshakeConfig  HandshakeConfig
+	streamSyncer     *StreamSyncer
+	commBridge       *CommunicationBridge
 
-	// Stream synchronization
-	streamSyncer *StreamSyncer
-	streamConfig StreamSyncConfig
+	// Configuration
+	handshakeConfig HandshakeConfig
+	streamConfig    StreamSyncConfig
+	bridgeConfig    BridgeConfig
 
-	// Bidirectional communication
-	commBridge   *CommunicationBridge
-	bridgeConfig BridgeConfig
-
-	// Lifecycle
-	started  bool
-	stopping bool
-	logger   Logger
+	// State tracking
+	mutex  sync.RWMutex
+	logger Logger
 }
 
 // ProcessInfo contains information about the running subprocess.
@@ -104,13 +97,11 @@ type SubprocessPluginFactory[Req, Resp any] struct {
 }
 
 // NewSubprocessPluginFactory creates a new subprocess plugin factory.
-func NewSubprocessPluginFactory[Req, Resp any](logger Logger) *SubprocessPluginFactory[Req, Resp] {
-	if logger == nil {
-		logger = DefaultLogger()
-	}
+func NewSubprocessPluginFactory[Req, Resp any](logger any) *SubprocessPluginFactory[Req, Resp] {
+	internalLogger := NewLogger(logger)
 
 	return &SubprocessPluginFactory[Req, Resp]{
-		logger: logger,
+		logger: internalLogger,
 	}
 }
 
@@ -148,16 +139,49 @@ func (f *SubprocessPluginFactory[Req, Resp]) CreatePlugin(config PluginConfig) (
 
 	logger := f.logger.With("plugin", config.Name, "executable", config.Endpoint)
 
+	// Create configuration parser and parse config
+	configParser := NewConfigParser(logger)
+	parsedConfig, err := configParser.ParseConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create process manager
+	processManager := NewProcessManager(ProcessManagerConfig{
+		ExecutablePath: parsedConfig.ExecutablePath,
+		Args:           parsedConfig.Args,
+		Env:            parsedConfig.Env,
+		Logger:         logger,
+	})
+
+	// Create legacy components for compatibility
+	handshakeManager := NewHandshakeManager(handshakeConfig, logger)
+	streamSyncer := NewStreamSyncer(streamConfig, logger)
+	commBridge := NewCommunicationBridge(bridgeConfig, logger)
+
+	// Create lifecycle manager
+	lifecycleManager := NewLifecycleManager(LifecycleConfig{
+		ProcessManager:      processManager,
+		ConfigParser:        configParser,
+		HandshakeManager:    handshakeManager,
+		StreamSyncer:        streamSyncer,
+		CommunicationBridge: commBridge,
+		HandshakeConfig:     handshakeConfig,
+		StreamConfig:        streamConfig,
+		BridgeConfig:        bridgeConfig,
+		Logger:              logger,
+	})
+
 	plugin := &SubprocessPlugin[Req, Resp]{
-		executablePath:   config.Endpoint,
-		args:             parseArgs(config),
-		env:              parseEnv(config),
+		processManager:   processManager,
+		configParser:     configParser,
+		lifecycleManager: lifecycleManager,
+		handshakeManager: handshakeManager,
+		streamSyncer:     streamSyncer,
+		commBridge:       commBridge,
 		handshakeConfig:  handshakeConfig,
-		handshakeManager: NewHandshakeManager(handshakeConfig, logger),
 		streamConfig:     streamConfig,
-		streamSyncer:     NewStreamSyncer(streamConfig, logger),
 		bridgeConfig:     bridgeConfig,
-		commBridge:       NewCommunicationBridge(bridgeConfig, logger),
 		logger:           logger,
 	}
 
@@ -198,7 +222,7 @@ func (sp *SubprocessPlugin[Req, Resp]) Execute(ctx context.Context, execCtx Exec
 	defer sp.mutex.Unlock()
 
 	// Start subprocess if not already running
-	if !sp.started {
+	if !sp.processManager.IsStarted() {
 		if err := sp.startProcess(ctx); err != nil {
 			return zero, NewProcessError("failed to start subprocess", err)
 		}
@@ -218,163 +242,14 @@ func (sp *SubprocessPlugin[Req, Resp]) Execute(ctx context.Context, execCtx Exec
 
 // startProcess launches the subprocess and establishes communication with handshake.
 func (sp *SubprocessPlugin[Req, Resp]) startProcess(ctx context.Context) error {
-	if sp.started {
+	if sp.processManager.IsStarted() {
 		return nil
 	}
 
-	if err := sp.validateExecutablePath(); err != nil {
-		return NewConfigValidationError("executable validation failed", err)
-	}
+	sp.logger.Info("Starting subprocess plugin with lifecycle manager")
 
-	sp.logger.Info("Starting subprocess plugin with handshake", "path", sp.executablePath, "args", sp.args)
-
-	if err := sp.setupCommunication(); err != nil {
-		return err
-	}
-
-	if err := sp.createAndConfigureCommand(ctx); err != nil {
-		return err
-	}
-
-	if err := sp.startProcessAndStreams(); err != nil {
-		return err
-	}
-
-	return sp.completeHandshakeAndFinalize(ctx)
-}
-
-// setupCommunication initializes the communication bridge and prepares handshake info
-func (sp *SubprocessPlugin[Req, Resp]) setupCommunication() error {
-	if err := sp.commBridge.Start(); err != nil {
-		return NewCommunicationError("failed to start communication bridge", err)
-	}
-	return nil
-}
-
-// createAndConfigureCommand creates the subprocess command with proper environment
-func (sp *SubprocessPlugin[Req, Resp]) createAndConfigureCommand(ctx context.Context) error {
-	handshakeInfo := HandshakeInfo{
-		ProtocolVersion: sp.handshakeConfig.ProtocolVersion,
-		PluginType:      PluginTypeGRPC,
-		ServerAddress:   sp.commBridge.GetAddress(),
-		ServerPort:      sp.commBridge.GetPort(),
-		PluginName:      "subprocess-plugin",
-		PluginVersion:   "1.0.0",
-	}
-
-	pluginEnv := sp.handshakeManager.PrepareEnvironment(handshakeInfo)
-	if len(sp.env) > 0 {
-		pluginEnv = append(pluginEnv, sp.env...)
-	}
-
-	sp.cmd = exec.CommandContext(ctx, sp.executablePath, sp.args...) // #nosec G204 -- path and args validated in validateExecutablePath
-	sp.cmd.Env = pluginEnv
-
-	return sp.setupStreamPipes()
-}
-
-// setupStreamPipes configures stdout and stderr pipes if stream synchronization is enabled
-func (sp *SubprocessPlugin[Req, Resp]) setupStreamPipes() error {
-	if sp.streamConfig.SyncStdout {
-		stdoutPipe, err := sp.cmd.StdoutPipe()
-		if err != nil {
-			return NewProcessError("failed to create stdout pipe", err)
-		}
-		if err := sp.streamSyncer.AddStream(StreamStdout, stdoutPipe); err != nil {
-			return NewProcessError("failed to add stdout stream", err)
-		}
-	}
-
-	if sp.streamConfig.SyncStderr {
-		stderrPipe, err := sp.cmd.StderrPipe()
-		if err != nil {
-			return NewProcessError("failed to create stderr pipe", err)
-		}
-		if err := sp.streamSyncer.AddStream(StreamStderr, stderrPipe); err != nil {
-			return NewProcessError("failed to add stderr stream", err)
-		}
-	}
-
-	return nil
-}
-
-// startProcessAndStreams starts the subprocess and stream synchronization
-func (sp *SubprocessPlugin[Req, Resp]) startProcessAndStreams() error {
-	if err := sp.cmd.Start(); err != nil {
-		return NewProcessError("failed to start process", err)
-	}
-
-	if err := sp.streamSyncer.Start(); err != nil {
-		sp.cleanupOnStartFailure()
-		return NewProcessError("failed to start stream synchronization", err)
-	}
-
-	sp.process = &ProcessInfo{
-		PID:       sp.cmd.Process.Pid,
-		StartTime: time.Now(),
-		Status:    StatusStarting,
-	}
-
-	return nil
-}
-
-// cleanupOnStartFailure cleans up resources when process start fails
-func (sp *SubprocessPlugin[Req, Resp]) cleanupOnStartFailure() {
-	if stopErr := sp.commBridge.Stop(); stopErr != nil {
-		sp.logger.Warn("Failed to stop communication bridge during cleanup", "error", stopErr)
-	}
-	if sp.cmd.Process != nil {
-		if killErr := sp.cmd.Process.Kill(); killErr != nil {
-			sp.logger.Warn("Failed to kill process during cleanup", "error", killErr)
-		}
-	}
-}
-
-// completeHandshakeAndFinalize waits for handshake and finalizes the startup
-func (sp *SubprocessPlugin[Req, Resp]) completeHandshakeAndFinalize(ctx context.Context) error {
-	handshakeCtx, cancel := context.WithTimeout(ctx, HandshakeTimeout)
-	defer cancel()
-
-	if err := sp.waitForHandshake(handshakeCtx); err != nil {
-		if stopErr := sp.Stop(ctx); stopErr != nil {
-			sp.logger.Warn("Failed to stop subprocess during handshake cleanup", "error", stopErr)
-		}
-		return NewHandshakeError("handshake failed", err)
-	}
-
-	sp.started = true
-	sp.process.Status = StatusRunning
-
-	sp.logger.Info("Subprocess plugin started successfully with handshake complete",
-		"pid", sp.process.PID,
-		"status", sp.process.Status)
-
-	return nil
-}
-
-// waitForHandshake waits for the subprocess to complete the handshake protocol.
-//
-// This implementation:
-// 1. Starts a TCP communication bridge to accept connections
-// 2. Waits for the plugin to connect back using provided environment variables
-// 3. Validates protocol information through handshake manager
-// 4. Confirms plugin capabilities and readiness
-func (sp *SubprocessPlugin[Req, Resp]) waitForHandshake(ctx context.Context) error {
-	sp.logger.Debug("Waiting for subprocess handshake completion", "timeout", HandshakeTimeout)
-
-	// Wait for subprocess to complete handshake through environment validation
-	handshakeCtx, cancel := context.WithTimeout(ctx, HandshakeTimeout)
-	defer cancel()
-
-	// The subprocess should connect to our communication bridge
-	// and validate the handshake environment we provided
-	select {
-	case <-handshakeCtx.Done():
-		return NewHandshakeError("handshake timeout", handshakeCtx.Err())
-	case <-time.After(100 * time.Millisecond): // Give time for connection
-		sp.logger.Debug("Handshake completed")
-		return nil
-	}
+	// Use lifecycle manager for coordinated startup
+	return sp.lifecycleManager.Startup(ctx)
 }
 
 // Stop gracefully stops the subprocess plugin.
@@ -382,77 +257,15 @@ func (sp *SubprocessPlugin[Req, Resp]) Stop(ctx context.Context) error {
 	sp.mutex.Lock()
 	defer sp.mutex.Unlock()
 
-	if !sp.started || sp.stopping {
+	if !sp.processManager.IsStarted() || sp.processManager.IsStopping() {
 		return nil
 	}
 
-	sp.stopping = true
-	sp.process.Status = StatusStopping
-	sp.logger.Info("Stopping subprocess plugin", "pid", sp.process.PID)
+	processInfo := sp.processManager.GetProcessInfo()
+	sp.logger.Info("Stopping subprocess plugin", "pid", processInfo.PID)
 
-	sp.stopInfrastructure()
-
-	if err := sp.gracefulProcessShutdown(ctx); err != nil {
-		return err
-	}
-
-	sp.finalizeStopping()
-	return nil
-}
-
-// stopInfrastructure stops stream syncer and communication bridge
-func (sp *SubprocessPlugin[Req, Resp]) stopInfrastructure() {
-	if sp.streamSyncer != nil {
-		if err := sp.streamSyncer.Stop(); err != nil {
-			sp.logger.Warn("Failed to stop stream synchronization", "error", err)
-		}
-	}
-
-	if sp.commBridge != nil {
-		if err := sp.commBridge.Stop(); err != nil {
-			sp.logger.Warn("Failed to stop communication bridge", "error", err)
-		}
-	}
-}
-
-// gracefulProcessShutdown attempts graceful shutdown with fallback to force kill
-func (sp *SubprocessPlugin[Req, Resp]) gracefulProcessShutdown(ctx context.Context) error {
-	if sp.cmd == nil || sp.cmd.Process == nil {
-		return nil
-	}
-
-	// Send signal for graceful shutdown
-	if err := sp.cmd.Process.Signal(nil); err != nil {
-		return nil // Process already terminated
-	}
-
-	// Wait for graceful shutdown with timeout
-	done := make(chan error, 1)
-	go func() {
-		done <- sp.cmd.Wait()
-	}()
-
-	select {
-	case <-ctx.Done():
-		// Force kill on timeout
-		if killErr := sp.cmd.Process.Kill(); killErr != nil {
-			sp.logger.Warn("Failed to kill process on timeout", "error", killErr)
-		}
-		return ctx.Err()
-	case err := <-done:
-		if err != nil {
-			sp.logger.Warn("Subprocess exited with error", "error", err)
-		}
-		return nil
-	}
-}
-
-// finalizeStopping resets internal state after successful stop
-func (sp *SubprocessPlugin[Req, Resp]) finalizeStopping() {
-	sp.started = false
-	sp.stopping = false
-	sp.process.Status = StatusStopped
-	sp.logger.Info("Subprocess plugin stopped")
+	// Use lifecycle manager for coordinated shutdown
+	return sp.lifecycleManager.Shutdown(ctx)
 }
 
 // Health implements the Plugin interface - checks if the subprocess is healthy.
@@ -462,7 +275,7 @@ func (sp *SubprocessPlugin[Req, Resp]) Health(ctx context.Context) HealthStatus 
 
 	now := time.Now()
 
-	if !sp.started {
+	if !sp.processManager.IsStarted() {
 		return HealthStatus{
 			Status:       StatusOffline,
 			Message:      "subprocess not started",
@@ -471,7 +284,8 @@ func (sp *SubprocessPlugin[Req, Resp]) Health(ctx context.Context) HealthStatus 
 		}
 	}
 
-	if sp.process == nil {
+	processInfo := sp.processManager.GetProcessInfo()
+	if processInfo == nil {
 		return HealthStatus{
 			Status:       StatusUnhealthy,
 			Message:      "no process information available",
@@ -480,10 +294,10 @@ func (sp *SubprocessPlugin[Req, Resp]) Health(ctx context.Context) HealthStatus 
 		}
 	}
 
-	if sp.process.Status != StatusRunning {
+	if processInfo.Status != StatusRunning {
 		return HealthStatus{
 			Status:       StatusOffline,
-			Message:      fmt.Sprintf("subprocess not running: %s", sp.process.Status),
+			Message:      fmt.Sprintf("subprocess not running: %s", processInfo.Status),
 			LastCheck:    now,
 			ResponseTime: 0,
 		}
@@ -491,16 +305,13 @@ func (sp *SubprocessPlugin[Req, Resp]) Health(ctx context.Context) HealthStatus 
 
 	start := time.Now()
 
-	// Check if process is still alive
-	if sp.cmd != nil && sp.cmd.Process != nil {
-		// On Unix systems, sending signal 0 checks if process exists
-		if err := sp.cmd.Process.Signal(nil); err != nil {
-			return HealthStatus{
-				Status:       StatusUnhealthy,
-				Message:      fmt.Sprintf("subprocess process check failed: %v", err),
-				LastCheck:    now,
-				ResponseTime: time.Since(start),
-			}
+	// Check if process is still alive using process manager
+	if !sp.processManager.IsAlive() {
+		return HealthStatus{
+			Status:       StatusUnhealthy,
+			Message:      "subprocess process check failed",
+			LastCheck:    now,
+			ResponseTime: time.Since(start),
 		}
 	}
 
@@ -514,16 +325,7 @@ func (sp *SubprocessPlugin[Req, Resp]) Health(ctx context.Context) HealthStatus 
 
 // GetInfo returns information about the subprocess.
 func (sp *SubprocessPlugin[Req, Resp]) GetInfo() *ProcessInfo {
-	sp.mutex.RLock()
-	defer sp.mutex.RUnlock()
-
-	if sp.process == nil {
-		return &ProcessInfo{Status: StatusStopped}
-	}
-
-	// Return copy to avoid races
-	info := *sp.process
-	return &info
+	return sp.processManager.GetProcessInfo()
 }
 
 // Close implements the Plugin interface - gracefully shuts down the subprocess.
@@ -541,119 +343,21 @@ func (sp *SubprocessPlugin[Req, Resp]) Info() PluginInfo {
 
 	metadata := make(map[string]string)
 	metadata["transport"] = string(TransportExecutable)
-	metadata["endpoint"] = sp.executablePath
 
-	if sp.process != nil {
-		metadata["pid"] = fmt.Sprintf("%d", sp.process.PID)
-		metadata["status"] = sp.process.Status.String()
-		metadata["started_at"] = sp.process.StartTime.Format(time.RFC3339)
+	// Get process information from process manager
+	processInfo := sp.processManager.GetProcessInfo()
+	if processInfo != nil {
+		metadata["pid"] = fmt.Sprintf("%d", processInfo.PID)
+		metadata["status"] = processInfo.Status.String()
+		metadata["started_at"] = processInfo.StartTime.Format(time.RFC3339)
 	}
 
 	return PluginInfo{
 		Name:         "subprocess-plugin",
 		Version:      "1.0.0",
-		Description:  fmt.Sprintf("Subprocess plugin: %s", sp.executablePath),
+		Description:  "Subprocess plugin with refactored architecture",
 		Author:       "AGILira go-plugins",
-		Capabilities: []string{"subprocess", "process-management", "standard-protocol"},
+		Capabilities: []string{"subprocess", "process-management", "standard-protocol", "refactored-soc"},
 		Metadata:     metadata,
 	}
-}
-
-// Helper functions (to be implemented)
-
-// parseArgs extracts command line arguments from plugin config.
-//
-// Arguments can be specified in several ways:
-// 1. config.Args (direct field)
-// 2. config.Options["args"] as []string
-// 3. config.Annotations["args"] as comma-separated string
-func parseArgs(config PluginConfig) []string {
-	// Use config.Args field first (direct approach)
-	if len(config.Args) > 0 {
-		return config.Args
-	}
-
-	// Try config.Options["args"]
-	if args, ok := config.Options["args"].([]string); ok {
-		return args
-	}
-
-	// Try config.Annotations["args"] as comma-separated string
-	if argsStr, ok := config.Annotations["args"]; ok && argsStr != "" {
-		var result []string
-		for _, arg := range strings.Split(argsStr, ",") {
-			if trimmed := strings.TrimSpace(arg); trimmed != "" {
-				result = append(result, trimmed)
-			}
-		}
-		return result
-	}
-
-	return []string{}
-}
-
-// parseEnv extracts environment variables from plugin config.
-//
-// Environment variables can be specified in several ways:
-// 1. config.Env (direct field)
-// 2. config.Options["env"] as []string in "KEY=VALUE" format
-// 3. config.Options["environment"] as map[string]string
-// 4. config.Annotations with "env_" prefix (e.g., "env_DEBUG=1")
-func parseEnv(config PluginConfig) []string {
-	var result []string
-
-	// Use config.Env field first (direct approach)
-	if len(config.Env) > 0 {
-		result = append(result, config.Env...)
-	}
-
-	// Try config.Options["env"] as []string
-	if env, ok := config.Options["env"].([]string); ok {
-		result = append(result, env...)
-	}
-
-	// Try config.Options["environment"] as map[string]string
-	if envMap, ok := config.Options["environment"].(map[string]string); ok {
-		for key, value := range envMap {
-			result = append(result, fmt.Sprintf("%s=%s", key, value))
-		}
-	}
-
-	// Try config.Annotations with "env_" prefix
-	for key, value := range config.Annotations {
-		if strings.HasPrefix(key, "env_") && value != "" {
-			envKey := strings.TrimPrefix(key, "env_")
-			if envKey != "" {
-				result = append(result, fmt.Sprintf("%s=%s", envKey, value))
-			}
-		}
-	}
-
-	return result
-}
-
-// validateExecutablePath validates the executable path to prevent command injection.
-func (sp *SubprocessPlugin[Req, Resp]) validateExecutablePath() error {
-	if sp.executablePath == "" {
-		return NewConfigPathError("", "executable path is empty")
-	}
-
-	// Check if the path contains potentially dangerous characters
-	if strings.Contains(sp.executablePath, "..") {
-		return NewPathTraversalError("executable path contains path traversal characters")
-	}
-
-	// Ensure the file exists and is executable
-	if _, err := os.Stat(sp.executablePath); err != nil {
-		return NewConfigFileError("", "executable not found", err)
-	}
-
-	// Validate arguments for basic injection prevention
-	for _, arg := range sp.args {
-		if strings.Contains(arg, ";") || strings.Contains(arg, "&") || strings.Contains(arg, "|") {
-			return NewConfigValidationError(fmt.Sprintf("argument contains potentially dangerous characters: %s", arg), nil)
-		}
-	}
-
-	return nil
 }

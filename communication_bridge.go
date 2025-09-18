@@ -111,7 +111,6 @@ type ConnectionProxy struct {
 	bridge     *CommunicationBridge
 
 	// Proxy state
-	created   time.Time
 	active    bool
 	activeMux sync.Mutex
 }
@@ -140,14 +139,14 @@ func (cb *CommunicationBridge) Start() error {
 	defer cb.runMutex.Unlock()
 
 	if cb.running {
-		return fmt.Errorf("communication bridge already running")
+		return NewCommunicationError("communication bridge already running", nil)
 	}
 
 	// Create listener
 	address := fmt.Sprintf("%s:%d", cb.config.ListenAddress, cb.config.ListenPort)
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		return fmt.Errorf("failed to create listener: %w", err)
+		return NewCommunicationError("failed to create listener", err)
 	}
 
 	cb.listener = listener
@@ -158,7 +157,7 @@ func (cb *CommunicationBridge) Start() error {
 		if closeErr := cb.listener.Close(); closeErr != nil {
 			cb.logger.Error("Failed to close listener", "error", closeErr)
 		}
-		return fmt.Errorf("listener address is not TCP")
+		return NewCommunicationError("listener address is not TCP", nil)
 	}
 	cb.address = tcpAddr.IP.String()
 	cb.port = tcpAddr.Port

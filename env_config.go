@@ -198,7 +198,7 @@ func expandSingleEnvironmentVariable(varName, inlineDefault string, options EnvC
 
 	// Handle missing variable based on configuration
 	if options.FailOnMissing {
-		return "", fmt.Errorf("required environment variable not found: %s (also tried %s)", varName, prefixedName)
+		return "", NewConfigValidationError(fmt.Sprintf("required environment variable not found: %s (also tried %s)", varName, prefixedName), nil)
 	}
 
 	// Return empty string if missing variables are allowed
@@ -224,19 +224,19 @@ func validateAndSanitizeValue(value string, options EnvConfigOptions) (string, e
 
 	// Check for null bytes (security risk)
 	if strings.Contains(value, "\x00") {
-		return "", fmt.Errorf("environment variable value contains null byte")
+		return "", NewConfigValidationError("environment variable value contains null byte", nil)
 	}
 
 	// Check for reasonable length (prevent memory exhaustion)
 	maxLength := 4096 // Reasonable limit for configuration values
 	if len(value) > maxLength {
-		return "", fmt.Errorf("environment variable value too long: %d bytes (max %d)", len(value), maxLength)
+		return "", NewConfigValidationError(fmt.Sprintf("environment variable value too long: %d bytes (max %d)", len(value), maxLength), nil)
 	}
 
 	// Check for dangerous control characters (basic protection)
 	for i, r := range value {
 		if r < 32 && r != '\t' && r != '\n' && r != '\r' {
-			return "", fmt.Errorf("environment variable contains control character at position %d", i)
+			return "", NewConfigValidationError(fmt.Sprintf("environment variable contains control character at position %d", i), nil)
 		}
 	}
 
@@ -288,14 +288,14 @@ func processManagerConfigWithEnv(config *ManagerConfig, options EnvConfigOptions
 	if config.LogLevel != "" {
 		config.LogLevel, err = ExpandEnvironmentVariables(config.LogLevel, options)
 		if err != nil {
-			return fmt.Errorf("failed to expand log level: %w", err)
+			return NewConfigValidationError("failed to expand log level", err)
 		}
 	}
 
 	// Process each plugin configuration
 	for i := range config.Plugins {
 		if err := processPluginConfigWithEnv(&config.Plugins[i], options); err != nil {
-			return fmt.Errorf("failed to process plugin %s: %w", config.Plugins[i].Name, err)
+			return NewPluginValidationError(i, err)
 		}
 	}
 
@@ -313,7 +313,7 @@ func processLibraryConfigWithEnv(config *LibraryConfig, options EnvConfigOptions
 	if config.Environment.VariablePrefix != "" {
 		config.Environment.VariablePrefix, err = ExpandEnvironmentVariables(config.Environment.VariablePrefix, options)
 		if err != nil {
-			return fmt.Errorf("failed to expand variable prefix: %w", err)
+			return NewConfigValidationError("failed to expand variable prefix", err)
 		}
 	}
 
@@ -321,7 +321,7 @@ func processLibraryConfigWithEnv(config *LibraryConfig, options EnvConfigOptions
 	for key, value := range config.Environment.Overrides {
 		expanded, err := ExpandEnvironmentVariables(value, options)
 		if err != nil {
-			return fmt.Errorf("failed to expand override %s: %w", key, err)
+			return NewConfigValidationError(fmt.Sprintf("failed to expand override %s", key), err)
 		}
 		config.Environment.Overrides[key] = expanded
 	}
@@ -330,7 +330,7 @@ func processLibraryConfigWithEnv(config *LibraryConfig, options EnvConfigOptions
 	for key, value := range config.Environment.Defaults {
 		expanded, err := ExpandEnvironmentVariables(value, options)
 		if err != nil {
-			return fmt.Errorf("failed to expand default %s: %w", key, err)
+			return NewConfigValidationError(fmt.Sprintf("failed to expand default %s", key), err)
 		}
 		config.Environment.Defaults[key] = expanded
 	}
@@ -343,40 +343,51 @@ func processLibraryConfigWithEnv(config *LibraryConfig, options EnvConfigOptions
 // This function expands environment variables in PluginConfig string fields,
 // allowing dynamic plugin configuration based on deployment environment.
 func processPluginConfigWithEnv(config *PluginConfig, options EnvConfigOptions) error {
-	var err error
-
 	// Expand basic string fields
-	if config.Endpoint != "" {
-		config.Endpoint, err = ExpandEnvironmentVariables(config.Endpoint, options)
-		if err != nil {
-			return fmt.Errorf("failed to expand endpoint: %w", err)
-		}
-	}
-
-	if config.Executable != "" {
-		config.Executable, err = ExpandEnvironmentVariables(config.Executable, options)
-		if err != nil {
-			return fmt.Errorf("failed to expand executable: %w", err)
-		}
-	}
-
-	if config.WorkDir != "" {
-		config.WorkDir, err = ExpandEnvironmentVariables(config.WorkDir, options)
-		if err != nil {
-			return fmt.Errorf("failed to expand work directory: %w", err)
-		}
+	if err := expandPluginStringFields(config, options); err != nil {
+		return err
 	}
 
 	// Expand auth configuration
 	if err := processAuthConfigWithEnv(&config.Auth, options); err != nil {
-		return fmt.Errorf("failed to process auth config: %w", err)
+		return NewConfigValidationError("failed to process auth config", err)
 	}
 
+	// Expand array fields
+	if err := expandPluginArrayFields(config, options); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// expandPluginStringFields expands environment variables in basic string fields
+func expandPluginStringFields(config *PluginConfig, options EnvConfigOptions) error {
+	stringFields := map[*string]string{
+		&config.Endpoint:   "endpoint",
+		&config.Executable: "executable",
+		&config.WorkDir:    "work directory",
+	}
+
+	for field, name := range stringFields {
+		if *field != "" {
+			expanded, err := ExpandEnvironmentVariables(*field, options)
+			if err != nil {
+				return NewConfigValidationError("failed to expand "+name, err)
+			}
+			*field = expanded
+		}
+	}
+	return nil
+}
+
+// expandPluginArrayFields expands environment variables in array fields
+func expandPluginArrayFields(config *PluginConfig, options EnvConfigOptions) error {
 	// Expand args slice
 	for i, arg := range config.Args {
 		expanded, err := ExpandEnvironmentVariables(arg, options)
 		if err != nil {
-			return fmt.Errorf("failed to expand arg %d: %w", i, err)
+			return NewConfigValidationError("failed to expand arg "+fmt.Sprintf("%d", i), err)
 		}
 		config.Args[i] = expanded
 	}
@@ -385,7 +396,7 @@ func processPluginConfigWithEnv(config *PluginConfig, options EnvConfigOptions) 
 	for i, envVar := range config.Env {
 		expanded, err := ExpandEnvironmentVariables(envVar, options)
 		if err != nil {
-			return fmt.Errorf("failed to expand env var %d: %w", i, err)
+			return NewConfigValidationError("failed to expand env var "+fmt.Sprintf("%d", i), err)
 		}
 		config.Env[i] = expanded
 	}
@@ -398,68 +409,74 @@ func processPluginConfigWithEnv(config *PluginConfig, options EnvConfigOptions) 
 // This function expands environment variables in authentication configuration,
 // enabling secure credential management through environment variables.
 func processAuthConfigWithEnv(config *AuthConfig, options EnvConfigOptions) error {
-	var err error
-
-	// Expand authentication fields
-	if config.APIKey != "" {
-		config.APIKey, err = ExpandEnvironmentVariables(config.APIKey, options)
-		if err != nil {
-			return fmt.Errorf("failed to expand API key: %w", err)
-		}
+	// Expand authentication credentials
+	if err := expandAuthCredentials(config, options); err != nil {
+		return err
 	}
 
-	if config.Token != "" {
-		config.Token, err = ExpandEnvironmentVariables(config.Token, options)
-		if err != nil {
-			return fmt.Errorf("failed to expand token: %w", err)
-		}
-	}
-
-	if config.Username != "" {
-		config.Username, err = ExpandEnvironmentVariables(config.Username, options)
-		if err != nil {
-			return fmt.Errorf("failed to expand username: %w", err)
-		}
-	}
-
-	if config.Password != "" {
-		config.Password, err = ExpandEnvironmentVariables(config.Password, options)
-		if err != nil {
-			return fmt.Errorf("failed to expand password: %w", err)
-		}
-	}
-
-	// Expand certificate paths
-	if config.CertFile != "" {
-		config.CertFile, err = ExpandEnvironmentVariables(config.CertFile, options)
-		if err != nil {
-			return fmt.Errorf("failed to expand cert file: %w", err)
-		}
-	}
-
-	if config.KeyFile != "" {
-		config.KeyFile, err = ExpandEnvironmentVariables(config.KeyFile, options)
-		if err != nil {
-			return fmt.Errorf("failed to expand key file: %w", err)
-		}
-	}
-
-	if config.CAFile != "" {
-		config.CAFile, err = ExpandEnvironmentVariables(config.CAFile, options)
-		if err != nil {
-			return fmt.Errorf("failed to expand CA file: %w", err)
-		}
+	// Expand certificate files
+	if err := expandCertificateFiles(config, options); err != nil {
+		return err
 	}
 
 	// Expand custom headers
+	if err := expandHeaders(config, options); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// expandAuthCredentials expands environment variables in authentication credentials
+func expandAuthCredentials(config *AuthConfig, options EnvConfigOptions) error {
+	fields := map[*string]string{
+		&config.APIKey:   "API key",
+		&config.Token:    "token",
+		&config.Username: "username",
+		&config.Password: "password",
+	}
+
+	for field, name := range fields {
+		if *field != "" {
+			expanded, err := ExpandEnvironmentVariables(*field, options)
+			if err != nil {
+				return NewConfigValidationError("failed to expand "+name, err)
+			}
+			*field = expanded
+		}
+	}
+	return nil
+}
+
+// expandCertificateFiles expands environment variables in certificate file paths
+func expandCertificateFiles(config *AuthConfig, options EnvConfigOptions) error {
+	certFields := map[*string]string{
+		&config.CertFile: "cert file",
+		&config.KeyFile:  "key file",
+		&config.CAFile:   "CA file",
+	}
+
+	for field, name := range certFields {
+		if *field != "" {
+			expanded, err := ExpandEnvironmentVariables(*field, options)
+			if err != nil {
+				return NewConfigValidationError("failed to expand "+name, err)
+			}
+			*field = expanded
+		}
+	}
+	return nil
+}
+
+// expandHeaders expands environment variables in custom headers
+func expandHeaders(config *AuthConfig, options EnvConfigOptions) error {
 	for key, value := range config.Headers {
 		expanded, err := ExpandEnvironmentVariables(value, options)
 		if err != nil {
-			return fmt.Errorf("failed to expand header %s: %w", key, err)
+			return NewConfigValidationError("failed to expand header "+key, err)
 		}
 		config.Headers[key] = expanded
 	}
-
 	return nil
 }
 
@@ -515,11 +532,11 @@ func CreateSampleEnvConfig(filename string) error {
 	// Convert to JSON and write to file
 	content, err := json.MarshalIndent(sampleConfig, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal sample config: %w", err)
+		return NewConfigValidationError("failed to marshal sample config", err)
 	}
 
 	if err := os.WriteFile(filename, content, 0600); err != nil {
-		return fmt.Errorf("failed to write sample config: %w", err)
+		return NewConfigValidationError("failed to write sample config", err)
 	}
 
 	return nil

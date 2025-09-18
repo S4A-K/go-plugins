@@ -62,23 +62,25 @@ func (m *Manager[Req, Resp]) DisableDynamicLoading() error {
 
 // ConfigureDiscovery configures the discovery engine with new settings.
 //
-// Note: Currently discovery configuration is set at initialization time.
-// Runtime reconfiguration will be implemented in a future version.
-// For now, this method returns the current discovery configuration.
-//
-// TODO: Implement runtime configuration updates for the discovery engine.
+// This method allows runtime reconfiguration of the discovery engine including
+// directories to scan, patterns to match, and other discovery parameters.
+// The configuration is applied immediately and affects subsequent discovery operations.
 func (m *Manager[Req, Resp]) ConfigureDiscovery(config ExtendedDiscoveryConfig) error {
 	if m.shutdown.Load() {
 		return errors.New("manager is shut down")
 	}
 
-	// For now, log the request but don't update config at runtime
-	m.logger.Info("Discovery configuration change requested (runtime updates not yet implemented)",
+	// Update the discovery engine configuration
+	if err := m.discoveryEngine.UpdateConfig(config); err != nil {
+		return NewDiscoveryError("failed to update discovery configuration", err)
+	}
+
+	m.logger.Info("Discovery configuration updated successfully",
 		"enabled", config.Enabled,
 		"directories", len(config.Directories),
 		"patterns", len(config.Patterns))
 
-	return NewDiscoveryError("runtime discovery configuration updates not yet implemented", nil)
+	return nil
 }
 
 // LoadDiscoveredPlugin manually loads a specific discovered plugin.

@@ -496,7 +496,6 @@ func TestConnectionProxyClose(t *testing.T) {
 		LocalAddr:  "127.0.0.1:54321",
 		conn:       nil, // Mock connection
 		bridge:     bridge,
-		created:    time.Now(),
 		active:     true,
 	}
 

@@ -248,7 +248,7 @@ func NewConfigWatcher[Req, Resp any](manager *Manager[Req, Resp], configPath str
 func (cw *ConfigWatcher[Req, Resp]) Start(ctx context.Context) error {
 	// Check if watcher has been permanently stopped
 	if cw.stopped.Load() {
-		return fmt.Errorf("config watcher has been permanently stopped and cannot be restarted")
+		return NewConfigValidationError("config watcher has been permanently stopped and cannot be restarted", nil)
 	}
 
 	cw.mu.Lock()
@@ -256,7 +256,7 @@ func (cw *ConfigWatcher[Req, Resp]) Start(ctx context.Context) error {
 
 	// Use CompareAndSwap to ensure only one goroutine actually starts the watcher
 	if !atomic.CompareAndSwapInt32(&cw.enabled, 0, 1) {
-		return fmt.Errorf("config watcher is already running")
+		return NewConfigValidationError("config watcher is already running", nil)
 	}
 
 	// Load initial configuration

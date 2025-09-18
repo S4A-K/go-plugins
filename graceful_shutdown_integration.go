@@ -160,7 +160,7 @@ func setupExamplePlugins(registry *PluginRegistry) error {
 	for _, config := range pluginConfigs {
 		client, err := registry.CreateClient(config)
 		if err != nil {
-			return fmt.Errorf("failed to create client %s: %w", config.Name, err)
+			return NewPluginConnectionFailedError(config.Name, err)
 		}
 
 		log.Printf("Created plugin client: %s (%s)", client.Name, client.Type)
@@ -264,10 +264,10 @@ func (sbs *SignalBasedShutdown) WaitForShutdown(ctx context.Context, timeout tim
 		// Attempt force shutdown as fallback
 		sbs.logger.Warn("Attempting force shutdown")
 		if forceErr := sbs.coordinator.ForceShutdown(); forceErr != nil {
-			return fmt.Errorf("both graceful and force shutdown failed: graceful=%w, force=%w", err, forceErr)
+			return NewPluginExecutionFailedError("shutdown", err)
 		}
 
-		return fmt.Errorf("graceful shutdown failed, but force shutdown succeeded: %w", err)
+		return NewPluginExecutionFailedError("graceful-shutdown", err)
 	}
 
 	sbs.logger.Info("Graceful shutdown completed successfully")

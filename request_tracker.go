@@ -100,12 +100,15 @@ func (rt *RequestTracker) EndRequest(pluginName string, ctx context.Context) {
 		}
 	}
 
-	// Remove context from active list
+	// Remove context from active list - thread-safe slice manipulation
 	rt.contextMu.Lock()
 	contexts := rt.activeContexts[pluginName]
 	for i, activeCtx := range contexts {
 		if activeCtx == ctx {
-			rt.activeContexts[pluginName] = append(contexts[:i], contexts[i+1:]...)
+			// Safe slice removal that prevents potential data races
+			copy(contexts[i:], contexts[i+1:])
+			contexts[len(contexts)-1] = nil // Avoid memory leak
+			rt.activeContexts[pluginName] = contexts[:len(contexts)-1]
 			break
 		}
 	}
@@ -153,7 +156,11 @@ func (rt *RequestTracker) ForceCancel(pluginName string) int {
 	contexts := rt.activeContexts[pluginName]
 	canceledCount := 0
 
-	for _, ctx := range contexts {
+	// Create a copy to avoid modifying slice while iterating
+	contextsCopy := make([]context.Context, len(contexts))
+	copy(contextsCopy, contexts)
+
+	for _, ctx := range contextsCopy {
 		if ctx.Value(cancelKey) != nil {
 			if cancelFunc, ok := ctx.Value(cancelKey).(context.CancelFunc); ok {
 				cancelFunc()
@@ -162,8 +169,11 @@ func (rt *RequestTracker) ForceCancel(pluginName string) int {
 		}
 	}
 
-	// Clear the contexts list
-	rt.activeContexts[pluginName] = nil
+	// Clear the contexts list safely - prevent memory leaks
+	for i := range contexts {
+		contexts[i] = nil
+	}
+	rt.activeContexts[pluginName] = rt.activeContexts[pluginName][:0]
 
 	return canceledCount
 }

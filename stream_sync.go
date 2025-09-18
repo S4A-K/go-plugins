@@ -147,7 +147,7 @@ func (ss *StreamSyncer) AddStream(streamType StreamType, reader io.ReadCloser) e
 	defer ss.mutex.Unlock()
 
 	if ss.started {
-		return fmt.Errorf("cannot add stream: syncer already started")
+		return NewCommunicationError("cannot add stream: syncer already started", nil)
 	}
 
 	// Check if this stream type should be synchronized
@@ -191,7 +191,7 @@ func (ss *StreamSyncer) Start() error {
 	defer ss.mutex.Unlock()
 
 	if ss.started {
-		return fmt.Errorf("stream syncer already started")
+		return NewCommunicationError("stream syncer already started", nil)
 	}
 
 	// Set default output writers if not configured
@@ -309,9 +309,39 @@ func (ss *StreamSyncer) syncStream(streamReader *StreamReader) {
 					"error", err)
 			}
 		} else {
-			// Streaming mode (not implemented yet)
-			ss.logger.Warn("Streaming mode not yet implemented, falling back to line buffered")
-			return
+			// Streaming mode - read in chunks and forward immediately
+			buffer := make([]byte, ss.config.BufferSize)
+			n, err := streamReader.reader.Read(buffer)
+
+			if err != nil {
+				if err != io.EOF {
+					ss.logger.Error("Stream read error",
+						"stream_type", streamReader.streamType.String(),
+						"error", err)
+				}
+				ss.logger.Debug("Stream ended", "stream_type", streamReader.streamType.String())
+				return
+			}
+
+			if n > 0 {
+				streamReader.bytesRead += int64(n)
+
+				// In streaming mode, optionally add timestamp/prefix per chunk
+				data := buffer[:n]
+				if ss.config.TimestampOutput || ss.config.PrefixOutput {
+					// Convert to string for formatting, then back to bytes
+					dataStr := string(data)
+					formattedStr := ss.formatStreamChunk(dataStr, streamReader.streamType)
+					data = []byte(formattedStr)
+				}
+
+				// Write directly to output without additional newlines
+				if _, err := writer.Write(data); err != nil {
+					ss.logger.Error("Failed to write to output stream",
+						"stream_type", streamReader.streamType.String(),
+						"error", err)
+				}
+			}
 		}
 	}
 }
@@ -331,6 +361,32 @@ func (ss *StreamSyncer) formatLine(line string, streamType StreamType) string {
 		// Include stream type in prefix
 		prefix := fmt.Sprintf("%s:%s", ss.config.OutputPrefix, streamType.String())
 		result = fmt.Sprintf("%s %s", prefix, result)
+	}
+
+	return result
+}
+
+// formatStreamChunk formats a data chunk for streaming mode output.
+// Unlike formatLine, this is designed for binary/chunk data that may not be line-oriented.
+func (ss *StreamSyncer) formatStreamChunk(chunk string, streamType StreamType) string {
+	result := chunk
+
+	// For streaming mode, we only add prefix/timestamp at the beginning of chunks
+	// to avoid breaking binary data or inserting formatting in the middle of output
+	if ss.config.PrefixOutput && ss.config.OutputPrefix != "" {
+		// Only add prefix if this chunk starts what looks like a new line or is the first chunk
+		if len(chunk) > 0 && (chunk[0] != ' ' && chunk[0] != '\t') {
+			prefix := fmt.Sprintf("%s:%s ", ss.config.OutputPrefix, streamType.String())
+			result = prefix + result
+		}
+	}
+
+	if ss.config.TimestampOutput {
+		// Only add timestamp at the beginning of chunks that look like new content
+		if len(chunk) > 0 && (chunk[0] != ' ' && chunk[0] != '\t') {
+			timestamp := time.Now().Format("2006-01-02 15:04:05.000")
+			result = fmt.Sprintf("[%s] %s", timestamp, result)
+		}
 	}
 
 	return result

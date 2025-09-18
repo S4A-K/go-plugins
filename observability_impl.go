@@ -196,143 +196,202 @@ func (demc *DefaultEnhancedMetricsCollector) GetPrometheusMetrics() []Prometheus
 
 	var metrics []PrometheusMetric
 
-	// First, get metrics from the basic collector
+	// Convert basic metrics from the default collector
 	basicMetrics := demc.DefaultMetricsCollector.GetMetrics()
+	metrics = append(metrics, demc.convertBasicMetrics(basicMetrics)...)
+
+	// Convert advanced counters
+	metrics = append(metrics, demc.convertAdvancedCounters()...)
+
+	// Convert advanced gauges
+	metrics = append(metrics, demc.convertAdvancedGauges()...)
+
+	return metrics
+}
+
+// convertBasicMetrics converts basic metrics to Prometheus format
+func (demc *DefaultEnhancedMetricsCollector) convertBasicMetrics(basicMetrics map[string]interface{}) []PrometheusMetric {
+	var metrics []PrometheusMetric
+
 	for name, value := range basicMetrics {
-		// Parse the metric name and labels
 		if strings.Contains(name, "{") && strings.Contains(name, "}") {
-			// Format: "metric_name{label1=value1,label2=value2}"
-			parts := strings.SplitN(name, "{", 2)
-			if len(parts) == 2 {
-				metricName := parts[0]
-				labelPart := strings.TrimSuffix(parts[1], "}")
-
-				labels := make(map[string]string)
-				if labelPart != "" {
-					labelPairs := strings.Split(labelPart, ",")
-					for _, pair := range labelPairs {
-						if kv := strings.SplitN(pair, "=", 2); len(kv) == 2 {
-							labels[kv[0]] = kv[1]
-						}
-					}
-				}
-
-				// Determine type and value
-				var metricType string
-				var metricValue float64
-
-				switch v := value.(type) {
-				case int64:
-					metricValue = float64(v)
-					if strings.Contains(metricName, "total") || strings.Contains(metricName, "count") {
-						metricType = "counter"
-					} else {
-						metricType = "gauge"
-					}
-				case []float64:
-					// Histogram - for now just use the count
-					metricValue = float64(len(v))
-					metricType = "histogram"
-				default:
-					continue
-				}
-
-				metrics = append(metrics, PrometheusMetric{
-					Name:        metricName,
-					Type:        metricType,
-					Description: fmt.Sprintf("%s metric for %s", cases.Title(language.English).String(metricType), metricName),
-					Value:       metricValue,
-					Labels:      labels,
-				})
-			}
+			metrics = append(metrics, demc.convertLabeledMetric(name, value)...)
 		} else {
-			// Simple metric without labels
-			var metricType string
-			var metricValue float64
-
-			switch v := value.(type) {
-			case int64:
-				metricValue = float64(v)
-				metricType = "gauge"
-			case float64:
-				metricValue = v
-				metricType = "gauge"
-			default:
-				continue
+			if metric := demc.convertSimpleMetric(name, value); metric != nil {
+				metrics = append(metrics, *metric)
 			}
-
-			metrics = append(metrics, PrometheusMetric{
-				Name:        name,
-				Type:        metricType,
-				Description: fmt.Sprintf("Gauge metric for %s", name),
-				Value:       metricValue,
-				Labels:      make(map[string]string),
-			})
-		}
-	}
-
-	// Then, convert advanced counters to Prometheus format
-	for key, counter := range demc.counters {
-		parts := strings.Split(key, ":")
-		if len(parts) >= 2 {
-			name := parts[0]
-			labelNames := strings.Split(parts[1], ",")
-
-			// For each value combination in the counter
-			counter.mu.RLock()
-			for labelValues, value := range counter.values {
-				labels := make(map[string]string)
-				valuesParts := strings.Split(labelValues, ":")
-				for i, labelName := range labelNames {
-					if i < len(valuesParts) && labelName != "" {
-						labels[labelName] = valuesParts[i]
-					}
-				}
-
-				metrics = append(metrics, PrometheusMetric{
-					Name:        name,
-					Type:        "counter",
-					Description: fmt.Sprintf("Counter metric for %s", name),
-					Value:       float64(value.Load()),
-					Labels:      labels,
-				})
-			}
-			counter.mu.RUnlock()
-		}
-	}
-
-	// Convert advanced gauges to Prometheus format
-	for key, gauge := range demc.gauges {
-		parts := strings.Split(key, ":")
-		if len(parts) >= 2 {
-			name := parts[0]
-			labelNames := strings.Split(parts[1], ",")
-
-			// For each value combination in the gauge
-			gauge.mu.RLock()
-			for labelValues, value := range gauge.values {
-				labels := make(map[string]string)
-				valuesParts := strings.Split(labelValues, ":")
-				for i, labelName := range labelNames {
-					if i < len(valuesParts) && labelName != "" {
-						labels[labelName] = valuesParts[i]
-					}
-				}
-
-				// Convert back from int64*1000 to float64
-				metrics = append(metrics, PrometheusMetric{
-					Name:        name,
-					Type:        "gauge",
-					Description: fmt.Sprintf("Gauge metric for %s", name),
-					Value:       float64(value.Load()) / 1000.0,
-					Labels:      labels,
-				})
-			}
-			gauge.mu.RUnlock()
 		}
 	}
 
 	return metrics
+}
+
+// convertLabeledMetric converts a metric with labels to Prometheus format
+func (demc *DefaultEnhancedMetricsCollector) convertLabeledMetric(name string, value interface{}) []PrometheusMetric {
+	// Format: "metric_name{label1=value1,label2=value2}"
+	parts := strings.SplitN(name, "{", 2)
+	if len(parts) != 2 {
+		return nil
+	}
+
+	metricName := parts[0]
+	labelPart := strings.TrimSuffix(parts[1], "}")
+	labels := demc.parseLabels(labelPart)
+
+	metricType, metricValue := demc.determineTypeAndValue(metricName, value)
+	if metricType == "" {
+		return nil
+	}
+
+	return []PrometheusMetric{{
+		Name:        metricName,
+		Type:        metricType,
+		Description: fmt.Sprintf("%s metric for %s", cases.Title(language.English).String(metricType), metricName),
+		Value:       metricValue,
+		Labels:      labels,
+	}}
+}
+
+// convertSimpleMetric converts a simple metric to Prometheus format
+func (demc *DefaultEnhancedMetricsCollector) convertSimpleMetric(name string, value interface{}) *PrometheusMetric {
+	metricType, metricValue := demc.determineTypeAndValue(name, value)
+	if metricType == "" {
+		return nil
+	}
+
+	return &PrometheusMetric{
+		Name:        name,
+		Type:        metricType,
+		Description: fmt.Sprintf("Gauge metric for %s", name),
+		Value:       metricValue,
+		Labels:      make(map[string]string),
+	}
+}
+
+// parseLabels parses label string into map
+func (demc *DefaultEnhancedMetricsCollector) parseLabels(labelPart string) map[string]string {
+	labels := make(map[string]string)
+	if labelPart == "" {
+		return labels
+	}
+
+	labelPairs := strings.Split(labelPart, ",")
+	for _, pair := range labelPairs {
+		if kv := strings.SplitN(pair, "=", 2); len(kv) == 2 {
+			labels[kv[0]] = kv[1]
+		}
+	}
+	return labels
+}
+
+// determineTypeAndValue determines metric type and converts value
+func (demc *DefaultEnhancedMetricsCollector) determineTypeAndValue(metricName string, value interface{}) (string, float64) {
+	switch v := value.(type) {
+	case int64:
+		metricType := "gauge"
+		if strings.Contains(metricName, "total") || strings.Contains(metricName, "count") {
+			metricType = "counter"
+		}
+		return metricType, float64(v)
+	case float64:
+		return "gauge", v
+	case []float64:
+		return "histogram", float64(len(v))
+	default:
+		return "", 0
+	}
+}
+
+// convertAdvancedCounters converts advanced counters to Prometheus format
+func (demc *DefaultEnhancedMetricsCollector) convertAdvancedCounters() []PrometheusMetric {
+	var metrics []PrometheusMetric
+
+	for key, counter := range demc.counters {
+		parts := strings.Split(key, ":")
+		if len(parts) < 2 {
+			continue
+		}
+
+		name := parts[0]
+		labelNames := strings.Split(parts[1], ",")
+		metrics = append(metrics, demc.convertCounterValues(name, labelNames, counter)...)
+	}
+
+	return metrics
+}
+
+// convertAdvancedGauges converts advanced gauges to Prometheus format
+func (demc *DefaultEnhancedMetricsCollector) convertAdvancedGauges() []PrometheusMetric {
+	var metrics []PrometheusMetric
+
+	for key, gauge := range demc.gauges {
+		parts := strings.Split(key, ":")
+		if len(parts) < 2 {
+			continue
+		}
+
+		name := parts[0]
+		labelNames := strings.Split(parts[1], ",")
+		metrics = append(metrics, demc.convertGaugeValues(name, labelNames, gauge)...)
+	}
+
+	return metrics
+}
+
+// convertCounterValues converts counter values to Prometheus metrics
+func (demc *DefaultEnhancedMetricsCollector) convertCounterValues(name string, labelNames []string, counter *EnhancedCounter) []PrometheusMetric {
+	var metrics []PrometheusMetric
+
+	counter.mu.RLock()
+	defer counter.mu.RUnlock()
+
+	for labelValues, value := range counter.values {
+		labels := demc.buildLabelsMap(labelNames, labelValues)
+		metrics = append(metrics, PrometheusMetric{
+			Name:        name,
+			Type:        "counter",
+			Description: fmt.Sprintf("Counter metric for %s", name),
+			Value:       float64(value.Load()),
+			Labels:      labels,
+		})
+	}
+
+	return metrics
+}
+
+// convertGaugeValues converts gauge values to Prometheus metrics
+func (demc *DefaultEnhancedMetricsCollector) convertGaugeValues(name string, labelNames []string, gauge *EnhancedGauge) []PrometheusMetric {
+	var metrics []PrometheusMetric
+
+	gauge.mu.RLock()
+	defer gauge.mu.RUnlock()
+
+	for labelValues, value := range gauge.values {
+		labels := demc.buildLabelsMap(labelNames, labelValues)
+		metrics = append(metrics, PrometheusMetric{
+			Name:        name,
+			Type:        "gauge",
+			Description: fmt.Sprintf("Gauge metric for %s", name),
+			Value:       float64(value.Load()) / 1000.0, // Convert back from int64*1000 to float64
+			Labels:      labels,
+		})
+	}
+
+	return metrics
+}
+
+// buildLabelsMap builds labels map from names and values
+func (demc *DefaultEnhancedMetricsCollector) buildLabelsMap(labelNames []string, labelValues string) map[string]string {
+	labels := make(map[string]string)
+	valuesParts := strings.Split(labelValues, ":")
+
+	for i, labelName := range labelNames {
+		if i < len(valuesParts) && labelName != "" {
+			labels[labelName] = valuesParts[i]
+		}
+	}
+
+	return labels
 }
 
 // Enhanced metric implementations

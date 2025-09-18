@@ -258,7 +258,7 @@ func TestPluginRegistryObservabilityIntegration(t *testing.T) {
 	registry := NewPluginRegistry(config)
 
 	// Enable observability
-	err := registry.EnableEnhancedObservability()
+	err := registry.EnableObservability()
 	if err != nil {
 		t.Fatalf("Failed to enable observability: %v", err)
 	}

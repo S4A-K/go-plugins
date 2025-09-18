@@ -125,7 +125,9 @@ func (sai *SecurityArgusIntegration) DisableWatching() error {
 
 	// Close audit logger
 	if sai.auditLogger != nil {
-		_ = sai.auditLogger.Close() // Ignore close error during cleanup
+		if err := sai.auditLogger.Close(); err != nil {
+			sai.logger.Warn("Failed to close audit logger during cleanup", "error", err)
+		}
 		sai.auditLogger = nil
 	}
 

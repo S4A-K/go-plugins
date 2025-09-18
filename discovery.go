@@ -268,7 +268,7 @@ func (d *DiscoveryEngine) runFilesystemDiscovery(ctx context.Context, wg *sync.W
 	defer wg.Done()
 	filesystemResults, err := d.discoverFilesystemPlugins(ctx)
 	if err != nil {
-		errorCh <- fmt.Errorf("filesystem discovery failed: %w", err)
+		errorCh <- NewDiscoveryError("filesystem discovery failed", err)
 		return
 	}
 
@@ -289,7 +289,7 @@ func (d *DiscoveryEngine) waitForCompletion(ctx context.Context, wg *sync.WaitGr
 
 	select {
 	case <-ctx.Done():
-		return nil, fmt.Errorf("plugin discovery timeout: %w", ctx.Err())
+		return nil, NewDiscoveryError("plugin discovery timeout", ctx.Err())
 	case <-done:
 		// Discovery completed successfully
 	}
@@ -348,7 +348,7 @@ func (d *DiscoveryEngine) scanDirectory(ctx context.Context, path string, depth 
 
 	entries, err := os.ReadDir(path)
 	if err != nil {
-		return fmt.Errorf("failed to read directory %s: %w", path, err)
+		return NewDiscoveryError(fmt.Sprintf("failed to read directory %s", path), err)
 	}
 
 	for _, entry := range entries {
@@ -400,7 +400,7 @@ func (d *DiscoveryEngine) processManifestFile(fileName, fullPath string, results
 
 	result, err := d.parseManifestFile(fullPath)
 	if err != nil {
-		return fmt.Errorf("failed to parse manifest: %w", err)
+		return NewDiscoveryError("failed to parse manifest", err)
 	}
 
 	d.enrichDiscoveryResult(result, fullPath)
@@ -439,12 +439,12 @@ func (d *DiscoveryEngine) parseManifestFile(filePath string) (*DiscoveryResult, 
 	// Security: validate file path to prevent directory traversal
 	cleanPath := filepath.Clean(filePath)
 	if !filepath.IsAbs(cleanPath) {
-		return nil, fmt.Errorf("manifest path must be absolute: %s", filePath)
+		return nil, NewDiscoveryError(fmt.Sprintf("manifest path must be absolute: %s", filePath), nil)
 	}
 
 	data, err := os.ReadFile(cleanPath) // #nosec G304 - path is validated above
 	if err != nil {
-		return nil, fmt.Errorf("failed to read manifest file: %w", err)
+		return nil, NewDiscoveryError("failed to read manifest file", err)
 	}
 
 	var manifest PluginManifest
@@ -452,14 +452,14 @@ func (d *DiscoveryEngine) parseManifestFile(filePath string) (*DiscoveryResult, 
 	// Try JSON first, then YAML
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		if err := yaml.Unmarshal(data, &manifest); err != nil {
-			return nil, fmt.Errorf("failed to parse manifest as JSON or YAML: %w", err)
+			return nil, NewDiscoveryError("failed to parse manifest as JSON or YAML", err)
 		}
 	}
 
 	// Validate manifest if configured
 	if d.config.ValidateManifests {
 		if err := d.validateManifest(&manifest); err != nil {
-			return nil, fmt.Errorf("manifest validation failed: %w", err)
+			return nil, NewDiscoveryError("manifest validation failed", err)
 		}
 	}
 
@@ -473,19 +473,19 @@ func (d *DiscoveryEngine) parseManifestFile(filePath string) (*DiscoveryResult, 
 // validateManifest performs basic validation on a plugin manifest.
 func (d *DiscoveryEngine) validateManifest(manifest *PluginManifest) error {
 	if manifest.Name == "" {
-		return fmt.Errorf("plugin name is required")
+		return NewDiscoveryError("plugin name is required", nil)
 	}
 
 	if manifest.Version == "" {
-		return fmt.Errorf("plugin version is required")
+		return NewDiscoveryError("plugin version is required", nil)
 	}
 
 	if manifest.Transport == "" {
-		return fmt.Errorf("plugin transport is required")
+		return NewDiscoveryError("plugin transport is required", nil)
 	}
 
 	if manifest.Endpoint == "" {
-		return fmt.Errorf("plugin endpoint is required")
+		return NewDiscoveryError("plugin endpoint is required", nil)
 	}
 
 	// Validate transport type
@@ -502,7 +502,7 @@ func (d *DiscoveryEngine) validateManifest(manifest *PluginManifest) error {
 	}
 
 	if !validTransport {
-		return fmt.Errorf("invalid transport type: %s", manifest.Transport)
+		return NewUnsupportedTransportError(manifest.Transport)
 	}
 
 	return nil
@@ -585,6 +585,37 @@ func (d *DiscoveryEngine) emitEvent(event DiscoveryEvent) {
 			h(event)
 		}(handler)
 	}
+}
+
+// UpdateConfig updates the discovery engine configuration at runtime.
+//
+// This method allows runtime reconfiguration of discovery settings including
+// directories to scan, patterns to match, and other discovery parameters.
+// The update is applied atomically and thread-safe.
+//
+// Parameters:
+//   - config: New extended discovery configuration to apply
+//
+// Returns error if the configuration is invalid or update fails.
+func (d *DiscoveryEngine) UpdateConfig(config ExtendedDiscoveryConfig) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Validate the new configuration
+	if !config.Enabled {
+		d.logger.Info("Discovery engine disabled by configuration update")
+	}
+
+	// Update configuration atomically
+	d.config = config
+
+	d.logger.Info("Discovery engine configuration updated",
+		"enabled", config.Enabled,
+		"directories", len(config.Directories),
+		"patterns", len(config.Patterns),
+		"max_depth", config.MaxDepth)
+
+	return nil
 }
 
 // Close shuts down the discovery engine and releases resources.

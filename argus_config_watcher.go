@@ -20,7 +20,6 @@ package goplugins
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +28,6 @@ import (
 	"time"
 
 	"github.com/agilira/argus"
-	"github.com/agilira/go-errors"
 	"gopkg.in/yaml.v3"
 )
 
@@ -82,6 +80,12 @@ type LibraryConfigWatcher[Req, Resp any] struct {
 	stopped  atomic.Bool // Permanent stop flag to prevent restart
 	stopOnce sync.Once   // Ensures Stop() is called exactly once
 	mutex    sync.Mutex  // Protects start/stop operations only
+
+	// Validation system
+	validator *ConfigValidator[Req, Resp] // Centralized configuration validation
+
+	// Application system
+	applicator *ConfigApplicator[Req, Resp] // Centralized configuration application
 
 	// Configuration options
 	options LibraryConfigOptions // Behavior customization options
@@ -445,9 +449,13 @@ func NewLibraryConfigWatcher[Req, Resp any](
 		var err error
 		auditLogger, err = argus.NewAuditLogger(options.AuditConfig)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create audit logger: %w", err)
+			return nil, NewConfigValidationError("failed to create audit logger", err)
 		}
 	}
+
+	// Create validator and applicator using type inference from manager
+	validator := NewConfigValidator[Req, Resp]()
+	applicator := NewConfigApplicator(manager, internalLogger)
 
 	return &LibraryConfigWatcher[Req, Resp]{
 		manager:     manager,
@@ -456,6 +464,8 @@ func NewLibraryConfigWatcher[Req, Resp any](
 		auditLogger: auditLogger,
 		configPath:  configPath,
 		envExpander: envExpander,
+		validator:   validator,  // Centralized validator with inferred types
+		applicator:  applicator, // Centralized applicator with inferred types
 		options:     options,
 	}, nil
 }
@@ -515,8 +525,8 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) Start(ctx context.Context) error {
 		return NewConfigWatcherError("failed to load initial library configuration", err)
 	}
 
-	// Apply initial configuration to manager (non-destructive)
-	if err := lcw.applyLibraryConfigToManager(initialConfig); err != nil {
+	// Apply initial configuration to manager using centralized applicator (non-destructive)
+	if err := lcw.applicator.ApplyLibraryConfig(initialConfig, nil, false); err != nil {
 		lcw.enabled.Store(false) // Reset state on failure
 		return NewConfigWatcherError("failed to apply initial library configuration", err)
 	}
@@ -670,8 +680,24 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) handleLibraryConfigChange(event argu
 		return
 	}
 
-	// Apply configuration changes with rollback capability
-	if err := lcw.applyLibraryConfigWithRollback(newConfig); err != nil {
+	// Validate before applying if enabled using centralized validator
+	if lcw.options.ValidateBeforeApply {
+		if err := lcw.validator.ValidateLibraryConfig(newConfig); err != nil {
+			lcw.logger.Error("Configuration validation failed", "error", err)
+			lcw.auditEvent("library_config_validation_failed", map[string]interface{}{
+				"path":    event.Path,
+				"error":   err.Error(),
+				"version": newConfig.Metadata.Version,
+			})
+			return
+		}
+	}
+
+	// Get current config for potential rollback
+	currentConfig := lcw.currentConfig.Load()
+
+	// Apply configuration changes with rollback capability using centralized applicator
+	if err := lcw.applicator.ApplyLibraryConfig(newConfig, currentConfig, lcw.options.RollbackOnFailure); err != nil {
 		lcw.logger.Error("Failed to apply library configuration changes", "error", err)
 		lcw.auditEvent("library_config_apply_failed", map[string]interface{}{
 			"path":    event.Path,
@@ -714,118 +740,40 @@ func getConfigVersion(config *LibraryConfig) string {
 	return config.Metadata.Version
 }
 
-// calculateLibraryConfigChanges identifies what changed between configurations.
+// calculateLibraryConfigChanges provides basic change summary for audit purposes.
 //
-// This function compares old and new library configurations to identify specific
-// changes, providing detailed change tracking for audit and debugging purposes.
+// Since Argus already handles change detection natively, this function provides
+// a simple high-level summary for audit logs without duplicating Argus functionality.
 func (lcw *LibraryConfigWatcher[Req, Resp]) calculateLibraryConfigChanges(oldConfig, newConfig *LibraryConfig) []string {
 	if oldConfig == nil {
 		return []string{"initial_configuration"}
 	}
 
-	changes := make([]string, 0)
+	// Simple high-level change detection for audit purposes
+	// Argus already detected the file change - we just summarize what sections might have changed
+	changes := []string{"configuration_updated"}
 
-	// Check logging configuration changes
-	if lcw.loggingConfigChanged(oldConfig.Logging, newConfig.Logging) {
-		changes = append(changes, "logging")
-	}
-
-	// Check observability configuration changes
-	if lcw.observabilityConfigChanged(oldConfig.Observability, newConfig.Observability) {
-		changes = append(changes, "observability")
-	}
-
-	// Check default policies changes
-	if lcw.defaultPoliciesChanged(oldConfig.DefaultPolicies, newConfig.DefaultPolicies) {
-		changes = append(changes, "default_policies")
-	}
-
-	// Check environment configuration changes
-	if lcw.environmentConfigChanged(oldConfig.Environment, newConfig.Environment) {
-		changes = append(changes, "environment")
-	}
-
-	// Check performance configuration changes
-	if oldConfig.Performance != newConfig.Performance {
-		changes = append(changes, "performance")
+	// Add version change if available
+	if oldConfig.Metadata.Version != newConfig.Metadata.Version {
+		changes = append(changes, "version_change")
 	}
 
 	return changes
 }
 
-// observabilityConfigChanged checks if observability configuration has changed.
-//
-// This function performs detailed comparison of observability settings to determine
-// if any runtime adjustments are needed for monitoring and metrics collection.
-func (lcw *LibraryConfigWatcher[Req, Resp]) observabilityConfigChanged(old, new ObservabilityRuntimeConfig) bool {
-	return old.MetricsEnabled != new.MetricsEnabled ||
-		old.MetricsInterval != new.MetricsInterval ||
-		old.TracingEnabled != new.TracingEnabled ||
-		old.TracingSampleRate != new.TracingSampleRate ||
-		old.HealthMetricsEnabled != new.HealthMetricsEnabled ||
-		old.PerformanceMetricsEnabled != new.PerformanceMetricsEnabled
-}
+// REMOVED: observabilityConfigChanged - redundant with Argus native change detection
 
-// defaultPoliciesChanged checks if default plugin policies have changed.
-//
-// This function compares default policy configurations that affect newly
-// registered plugins. Changes to these policies don't affect existing plugins.
-func (lcw *LibraryConfigWatcher[Req, Resp]) defaultPoliciesChanged(old, new DefaultPoliciesConfig) bool {
-	return old.Retry != new.Retry ||
-		old.CircuitBreaker != new.CircuitBreaker ||
-		old.HealthCheck != new.HealthCheck ||
-		old.Connection != new.Connection ||
-		old.RateLimit != new.RateLimit
-}
+// REMOVED: defaultPoliciesChanged - redundant with Argus native change detection
 
-// environmentConfigChanged checks if environment configuration has changed.
-//
-// This function compares environment variable expansion settings and overrides
-// to determine if environment processing needs to be updated.
-func (lcw *LibraryConfigWatcher[Req, Resp]) environmentConfigChanged(old, new EnvironmentConfig) bool {
-	return old.ExpansionEnabled != new.ExpansionEnabled ||
-		old.VariablePrefix != new.VariablePrefix ||
-		old.FailOnMissing != new.FailOnMissing ||
-		!stringMapsEqual(old.Overrides, new.Overrides) ||
-		!stringMapsEqual(old.Defaults, new.Defaults)
-}
+// REMOVED: environmentConfigChanged - redundant with Argus native change detection
 
-// stringMapsEqual compares two string maps for equality.
-//
-// This utility function performs deep comparison of string maps, handling
-// nil maps correctly and ensuring accurate change detection.
-func stringMapsEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
-}
+// REMOVED: stringMapsEqual utility - no longer needed
 
-// auditEvent logs a library configuration event to the audit trail.
-//
-// This method provides centralized audit logging for all library configuration
-// events, ensuring comprehensive tracking for compliance and debugging.
+// auditEvent provides simplified audit logging for library configuration events.
 func (lcw *LibraryConfigWatcher[Req, Resp]) auditEvent(eventType string, context map[string]interface{}) {
-	if lcw.auditLogger == nil {
-		return // Audit logging not enabled
+	if lcw.auditLogger != nil {
+		lcw.auditLogger.LogSecurityEvent(eventType, "Library configuration change", context)
 	}
-
-	// Add standard context information
-	if context == nil {
-		context = make(map[string]interface{})
-	}
-
-	context["component"] = "library_config_watcher"
-	context["timestamp"] = time.Now().Format(time.RFC3339)
-	context["pid"] = os.Getpid()
-
-	// Log the audit event
-	lcw.auditLogger.LogSecurityEvent(eventType, "Library configuration change", context)
 }
 
 // loadLibraryConfigFromFile loads library configuration from file with format detection.
@@ -842,36 +790,97 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) auditEvent(eventType string, context
 func (lcw *LibraryConfigWatcher[Req, Resp]) loadLibraryConfigFromFile(path string) (LibraryConfig, error) {
 	var config LibraryConfig
 
-	// Validate file path for security
-	if err := lcw.validateConfigFilePath(path); err != nil {
-		return config, NewConfigPathError(lcw.configPath, "invalid config file path")
+	// Validate file path
+	cleanPath, err := lcw.validateConfigPath(path)
+	if err != nil {
+		return config, err
+	}
+
+	// Read and validate file content
+	configBytes, err := lcw.readConfigFileSecurely(cleanPath)
+	if err != nil {
+		return config, err
+	}
+
+	// Parse configuration based on format
+	config, err = lcw.parseConfigContent(configBytes, path)
+	if err != nil {
+		return config, err
+	}
+
+	// Apply environment expansion and validation
+	if err := lcw.processConfigPostParsing(&config, path); err != nil {
+		return config, err
+	}
+
+	return config, nil
+}
+
+// validateConfigPath validates and cleans the configuration file path
+func (lcw *LibraryConfigWatcher[Req, Resp]) validateConfigPath(path string) (string, error) {
+	if path == "" {
+		return "", NewConfigPathError(lcw.configPath, "empty config file path")
+	}
+
+	cleanPath := filepath.Clean(path)
+	if !filepath.IsAbs(cleanPath) || strings.Contains(path, "..") {
+		return "", NewConfigPathError(lcw.configPath, "invalid or unsafe config file path")
+	}
+
+	return cleanPath, nil
+}
+
+// readConfigFileSecurely reads and validates the configuration file
+func (lcw *LibraryConfigWatcher[Req, Resp]) readConfigFileSecurely(cleanPath string) ([]byte, error) {
+	// Check file exists, is readable, and reasonable size
+	info, err := os.Stat(cleanPath)
+	if err != nil {
+		return nil, NewConfigFileError(lcw.configPath, "cannot access config file", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 10*1024*1024 {
+		return nil, NewConfigFileError(lcw.configPath, "config file invalid or too large", nil)
 	}
 
 	// Read file content securely
-	configBytes, err := lcw.readConfigFileSecurely(path)
+	configBytes, err := os.ReadFile(cleanPath) // #nosec G304 -- Path validated above
 	if err != nil {
-		return config, NewConfigFileError(lcw.configPath, "failed to read config file", err)
+		return nil, NewConfigFileError(lcw.configPath, "failed to read config file", err)
+	}
+	if len(configBytes) == 0 {
+		return nil, NewConfigFileError(lcw.configPath, "config file is empty", nil)
 	}
 
-	// Detect format and parse accordingly
+	return configBytes, nil
+}
+
+// parseConfigContent parses the configuration content based on format
+func (lcw *LibraryConfigWatcher[Req, Resp]) parseConfigContent(configBytes []byte, path string) (LibraryConfig, error) {
+	var config LibraryConfig
+
 	format := argus.DetectFormat(path)
+	var err error
 	switch format {
 	case argus.FormatJSON:
 		err = json.Unmarshal(configBytes, &config)
 	case argus.FormatYAML:
 		err = yaml.Unmarshal(configBytes, &config)
 	default:
-		return config, NewConfigParseError(lcw.configPath, fmt.Errorf("unsupported config format: %s", format))
+		return config, NewConfigParseError(lcw.configPath, NewConfigValidationError("unsupported config format: "+format.String(), nil))
 	}
 
 	if err != nil {
 		return config, NewConfigParseError(lcw.configPath, err)
 	}
 
+	return config, nil
+}
+
+// processConfigPostParsing handles environment expansion and validation
+func (lcw *LibraryConfigWatcher[Req, Resp]) processConfigPostParsing(config *LibraryConfig, path string) error {
 	// Apply environment variable expansion if enabled
 	if lcw.envExpander != nil && lcw.options.EnableEnvExpansion {
-		if err := lcw.expandEnvironmentVariables(&config); err != nil {
-			return config, NewConfigValidationError("environment variable expansion failed", err)
+		if err := lcw.expandEnvironmentVariables(config); err != nil {
+			return NewConfigValidationError("environment variable expansion failed", err)
 		}
 
 		// Audit successful environment expansion
@@ -882,69 +891,17 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) loadLibraryConfigFromFile(path strin
 		})
 	}
 
-	// Validate configuration structure
-	if err := lcw.validateLibraryConfig(config); err != nil {
-		return config, NewConfigValidationError("invalid library configuration", err)
-	}
-
-	return config, nil
-}
-
-// validateConfigFilePath validates the configuration file path for security.
-//
-// This function performs basic path validation to prevent directory traversal
-// and other path-based security issues. It ensures the file exists and is readable.
-func (lcw *LibraryConfigWatcher[Req, Resp]) validateConfigFilePath(path string) error {
-	if path == "" {
-		return NewConfigPathError("", "empty config file path")
-	}
-
-	// Check file exists and is readable
-	info, err := os.Stat(path)
-	if err != nil {
-		return NewConfigFileError(path, "cannot access config file", err)
-	}
-
-	// Ensure it's a regular file
-	if !info.Mode().IsRegular() {
-		return NewConfigFileError(path, "config path is not a regular file", nil)
-	}
-
-	// Check reasonable file size (10MB max)
-	if info.Size() > 10*1024*1024 {
-		return NewConfigFileError(path, fmt.Sprintf("config file too large: %d bytes", info.Size()), nil)
+	// Validate configuration structure using centralized validator
+	if err := lcw.validator.ValidateLibraryConfig(*config); err != nil {
+		return NewConfigValidationError("invalid library configuration", err)
 	}
 
 	return nil
 }
 
-// readConfigFileSecurely reads the configuration file with security checks.
-//
-// This function safely reads the configuration file content with appropriate
-// security measures and error handling.
-func (lcw *LibraryConfigWatcher[Req, Resp]) readConfigFileSecurely(path string) ([]byte, error) {
-	// Security: Validate path to prevent path traversal attacks
-	cleanPath := filepath.Clean(path)
-	if !filepath.IsAbs(cleanPath) {
-		return nil, NewConfigPathError(path, "config file path must be absolute")
-	}
+// REMOVED: validateConfigFilePath - inlined into loadLibraryConfigFromFile for simplicity
 
-	// Additional security: check for path traversal attempts
-	if strings.Contains(path, "..") {
-		return nil, NewPathTraversalError(path)
-	}
-
-	content, err := os.ReadFile(cleanPath) // #nosec G304 -- Path is validated above
-	if err != nil {
-		return nil, NewConfigFileError(cleanPath, "failed to read file", err)
-	}
-
-	if len(content) == 0 {
-		return nil, NewConfigFileError(cleanPath, "config file is empty", nil)
-	}
-
-	return content, nil
-}
+// REMOVED: readConfigFileSecurely - inlined into loadLibraryConfigFromFile for simplicity
 
 // expandEnvironmentVariables expands environment variables in the configuration.
 //
@@ -952,546 +909,123 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) readConfigFileSecurely(path string) 
 // placeholders with actual environment variable values, providing safe
 // expansion with proper error handling.
 func (lcw *LibraryConfigWatcher[Req, Resp]) expandEnvironmentVariables(config *LibraryConfig) error {
-	var err error
+	expander := &envExpander{}
 
-	// Expand logging configuration fields
-	if config.Logging.Level != "" {
-		config.Logging.Level, err = lcw.expandSingleVariable(config.Logging.Level)
-		if err != nil {
-			return fmt.Errorf("failed to expand logging level: %w", err)
-		}
+	if err := expander.expandLoggingConfig(&config.Logging); err != nil {
+		return err
 	}
 
-	if config.Logging.Format != "" {
-		config.Logging.Format, err = lcw.expandSingleVariable(config.Logging.Format)
-		if err != nil {
-			return fmt.Errorf("failed to expand logging format: %w", err)
-		}
+	if err := expander.expandEnvironmentConfig(&config.Environment); err != nil {
+		return err
 	}
 
-	// Expand component-specific log levels
-	for component, level := range config.Logging.ComponentLevels {
-		expanded, err := lcw.expandSingleVariable(level)
-		if err != nil {
-			return fmt.Errorf("failed to expand component log level %s: %w", component, err)
-		}
-		config.Logging.ComponentLevels[component] = expanded
-	}
-
-	// Expand environment configuration fields
-	if config.Environment.VariablePrefix != "" {
-		config.Environment.VariablePrefix, err = lcw.expandSingleVariable(config.Environment.VariablePrefix)
-		if err != nil {
-			return fmt.Errorf("failed to expand variable prefix: %w", err)
-		}
-	}
-
-	// Expand override values
-	for key, value := range config.Environment.Overrides {
-		expanded, err := lcw.expandSingleVariable(value)
-		if err != nil {
-			return fmt.Errorf("failed to expand override %s: %w", key, err)
-		}
-		config.Environment.Overrides[key] = expanded
-	}
-
-	// Expand default values
-	for key, value := range config.Environment.Defaults {
-		expanded, err := lcw.expandSingleVariable(value)
-		if err != nil {
-			return fmt.Errorf("failed to expand default %s: %w", key, err)
-		}
-		config.Environment.Defaults[key] = expanded
-	}
-
-	// Expand metadata fields that might contain environment variables
-	if config.Metadata.Environment != "" {
-		config.Metadata.Environment, err = lcw.expandSingleVariable(config.Metadata.Environment)
-		if err != nil {
-			return fmt.Errorf("failed to expand metadata environment: %w", err)
-		}
-	}
-
-	if config.Metadata.Description != "" {
-		config.Metadata.Description, err = lcw.expandSingleVariable(config.Metadata.Description)
-		if err != nil {
-			return fmt.Errorf("failed to expand metadata description: %w", err)
-		}
-	}
-
-	return nil
-}
-
-// expandSingleVariable expands a single environment variable placeholder.
-//
-// This function processes a string that may contain ${VAR} placeholders,
-// replacing them with environment variable values or defaults.
-func (lcw *LibraryConfigWatcher[Req, Resp]) expandSingleVariable(value string) (string, error) {
-	if value == "" {
-		return value, nil
-	}
-
-	// Use the existing ExpandEnvironmentVariables function from env_config.go
-	options := EnvConfigOptions{
-		Prefix:         "",
-		FailOnMissing:  false,
-		ValidateValues: false, // Skip validation in expansion phase
-		AllowOverrides: true,
-		Defaults:       make(map[string]string),
-		Overrides:      make(map[string]string),
-	}
-
-	return ExpandEnvironmentVariables(value, options)
-}
-
-// validateLibraryConfig validates the loaded library configuration.
-//
-// This function performs structural and business logic validation on the
-// library configuration to ensure it's valid and safe to apply.
-func (lcw *LibraryConfigWatcher[Req, Resp]) validateLibraryConfig(config LibraryConfig) error {
-	// Validate logging configuration
-	if err := lcw.validateLoggingConfig(config.Logging); err != nil {
-		return NewConfigValidationError("invalid logging config", err)
-	}
-
-	// Validate observability configuration
-	if err := lcw.validateObservabilityConfig(config.Observability); err != nil {
-		return NewConfigValidationError("invalid observability config", err)
-	}
-
-	// Validate performance configuration
-	if err := lcw.validatePerformanceConfig(config.Performance); err != nil {
-		return NewConfigValidationError("invalid performance config", err)
-	}
-
-	// Validate default policies configuration
-	if err := lcw.validateDefaultPoliciesConfig(config.DefaultPolicies); err != nil {
-		return NewConfigValidationError("invalid default policies config", err)
-	}
-
-	// Validate security configuration
-	if err := lcw.validateSecurityConfig(config.Security); err != nil {
-		return NewConfigValidationError("invalid security config", err)
-	}
-
-	return nil
-}
-
-// validateLoggingConfig validates logging configuration settings.
-func (lcw *LibraryConfigWatcher[Req, Resp]) validateLoggingConfig(config LoggingConfig) error {
-	validLevels := []string{"debug", "info", "warn", "error"}
-	levelValid := false
-	for _, level := range validLevels {
-		if config.Level == level {
-			levelValid = true
-			break
-		}
-	}
-
-	if !levelValid {
-		return NewConfigValidationError(fmt.Sprintf("invalid log level: %s (must be one of: debug, info, warn, error)", config.Level), nil)
-	}
-
-	return nil
-}
-
-// validateObservabilityConfig validates observability configuration settings.
-func (lcw *LibraryConfigWatcher[Req, Resp]) validateObservabilityConfig(config ObservabilityRuntimeConfig) error {
-	if config.TracingSampleRate < 0.0 || config.TracingSampleRate > 1.0 {
-		return NewConfigValidationError(fmt.Sprintf("invalid tracing sample rate: %f (must be between 0.0 and 1.0)", config.TracingSampleRate), nil)
-	}
-
-	if config.MetricsInterval < time.Second {
-		return NewConfigValidationError(fmt.Sprintf("metrics interval too short: %v (minimum 1 second)", config.MetricsInterval), nil)
-	}
-
-	return nil
-}
-
-// validatePerformanceConfig validates performance configuration settings.
-func (lcw *LibraryConfigWatcher[Req, Resp]) validatePerformanceConfig(config PerformanceConfig) error {
-	if config.WatcherPollInterval < time.Second {
-		return NewConfigValidationError(fmt.Sprintf("watcher poll interval too short: %v (minimum 1 second)", config.WatcherPollInterval), nil)
-	}
-
-	if config.MaxConcurrentHealthChecks < 1 {
-		return NewConfigValidationError(fmt.Sprintf("max concurrent health checks must be at least 1, got: %d", config.MaxConcurrentHealthChecks), nil)
-	}
-
-	return nil
-}
-
-// validateDefaultPoliciesConfig validates default policies configuration settings.
-func (lcw *LibraryConfigWatcher[Req, Resp]) validateDefaultPoliciesConfig(config DefaultPoliciesConfig) error {
-	// Validate retry configuration
-	if config.Retry.MaxRetries < 0 {
-		return fmt.Errorf("invalid retry max_retries: %d (must be >= 0)", config.Retry.MaxRetries)
-	}
-
-	if config.Retry.Multiplier <= 0 {
-		return fmt.Errorf("invalid retry multiplier: %f (must be > 0)", config.Retry.Multiplier)
-	}
-
-	if config.Retry.InitialInterval < 0 {
-		return fmt.Errorf("invalid retry initial_interval: %v (must be >= 0)", config.Retry.InitialInterval)
-	}
-
-	if config.Retry.MaxInterval < config.Retry.InitialInterval {
-		return fmt.Errorf("invalid retry configuration: max_interval (%v) must be >= initial_interval (%v)",
-			config.Retry.MaxInterval, config.Retry.InitialInterval)
-	}
-
-	// Validate circuit breaker configuration
-	if config.CircuitBreaker.FailureThreshold < 0 {
-		return fmt.Errorf("invalid circuit breaker failure_threshold: %d (must be >= 0)", config.CircuitBreaker.FailureThreshold)
-	}
-
-	if config.CircuitBreaker.RecoveryTimeout < 0 {
-		return fmt.Errorf("invalid circuit breaker recovery_timeout: %v (must be >= 0)", config.CircuitBreaker.RecoveryTimeout)
-	}
-
-	if config.CircuitBreaker.MinRequestThreshold < 0 {
-		return fmt.Errorf("invalid circuit breaker min_request_threshold: %d (must be >= 0)", config.CircuitBreaker.MinRequestThreshold)
-	}
-
-	if config.CircuitBreaker.SuccessThreshold <= 0 && config.CircuitBreaker.Enabled {
-		return fmt.Errorf("invalid circuit breaker success_threshold: %d (must be > 0 when enabled)", config.CircuitBreaker.SuccessThreshold)
-	}
-
-	// Validate health check configuration
-	if config.HealthCheck.Interval <= 0 && config.HealthCheck.Enabled {
-		return fmt.Errorf("invalid health check interval: %v (must be > 0 when enabled)", config.HealthCheck.Interval)
-	}
-
-	if config.HealthCheck.Timeout <= 0 && config.HealthCheck.Enabled {
-		return fmt.Errorf("invalid health check timeout: %v (must be > 0 when enabled)", config.HealthCheck.Timeout)
-	}
-
-	if config.HealthCheck.FailureLimit <= 0 && config.HealthCheck.Enabled {
-		return fmt.Errorf("invalid health check failure_limit: %d (must be > 0 when enabled)", config.HealthCheck.FailureLimit)
-	}
-
-	// Validate connection configuration
-	if config.Connection.MaxConnections < 0 {
-		return fmt.Errorf("invalid connection max_connections: %d (must be >= 0)", config.Connection.MaxConnections)
-	}
-
-	if config.Connection.MaxIdleConnections < 0 {
-		return fmt.Errorf("invalid connection max_idle_connections: %d (must be >= 0)", config.Connection.MaxIdleConnections)
-	}
-
-	if config.Connection.IdleTimeout < 0 {
-		return fmt.Errorf("invalid connection idle_timeout: %v (must be >= 0)", config.Connection.IdleTimeout)
-	}
-
-	if config.Connection.ConnectionTimeout < 0 {
-		return fmt.Errorf("invalid connection connection_timeout: %v (must be >= 0)", config.Connection.ConnectionTimeout)
-	}
-
-	if config.Connection.RequestTimeout < 0 {
-		return fmt.Errorf("invalid connection request_timeout: %v (must be >= 0)", config.Connection.RequestTimeout)
-	}
-
-	// Validate rate limit configuration
-	if config.RateLimit.RequestsPerSecond < 0 {
-		return fmt.Errorf("invalid rate limit requests_per_second: %f (must be >= 0)", config.RateLimit.RequestsPerSecond)
-	}
-
-	if config.RateLimit.BurstSize < 0 {
-		return fmt.Errorf("invalid rate limit burst_size: %d (must be >= 0)", config.RateLimit.BurstSize)
-	}
-
-	if config.RateLimit.TimeWindow <= 0 && config.RateLimit.Enabled {
-		return fmt.Errorf("invalid rate limit time_window: %v (must be > 0 when enabled)", config.RateLimit.TimeWindow)
-	}
-
-	return nil
-}
-
-// validateSecurityConfig validates security configuration settings.
-//
-// This function validates all security-related configuration including
-// whitelist policies, security levels, and audit settings.
-func (lcw *LibraryConfigWatcher[Req, Resp]) validateSecurityConfig(config SecurityConfig) error {
-	// Validate policy enum value
-	if config.Policy < 0 || config.Policy > SecurityPolicyAuditOnly {
-		return fmt.Errorf("invalid security policy: %d (must be 0-3)", config.Policy)
-	}
-
-	// Validate whitelist file path if specified
-	if config.WhitelistFile != "" && !filepath.IsAbs(config.WhitelistFile) {
-		return fmt.Errorf("whitelist file path must be absolute: %s", config.WhitelistFile)
-	}
-
-	// Validate hash algorithm
-	if config.HashAlgorithm != "" && config.HashAlgorithm != HashAlgorithmSHA256 {
-		return fmt.Errorf("invalid hash algorithm: %s", config.HashAlgorithm)
-	}
-
-	// Validate max file size (must not be negative if specified)
-	if config.MaxFileSize < 0 {
-		return fmt.Errorf("max file size cannot be negative: %d", config.MaxFileSize)
-	}
-
-	// Validate allowed types (no empty strings)
-	for i, allowedType := range config.AllowedTypes {
-		if allowedType == "" {
-			return fmt.Errorf("allowed type at index %d cannot be empty", i)
-		}
-	}
-
-	// Validate forbidden paths (must be absolute if specified)
-	for i, forbiddenPath := range config.ForbiddenPaths {
-		if forbiddenPath != "" && !filepath.IsAbs(forbiddenPath) {
-			return fmt.Errorf("forbidden path at index %d must be absolute: %s", i, forbiddenPath)
-		}
-	}
-
-	// Validate audit configuration
-	if config.AuditConfig.Enabled {
-		// Validate audit file path if specified
-		if config.AuditConfig.AuditFile != "" && !filepath.IsAbs(config.AuditConfig.AuditFile) {
-			return fmt.Errorf("audit file path must be absolute: %s", config.AuditConfig.AuditFile)
-		}
-	}
-
-	// Validate reload delay (must not be negative)
-	if config.ReloadDelay < 0 {
-		return fmt.Errorf("reload delay cannot be negative: %v", config.ReloadDelay)
-	}
-
-	return nil
-}
-
-// applyLibraryConfigToManager applies library configuration to the manager.
-//
-// This function updates the manager with the new library configuration,
-// applying changes that can be made at runtime without disrupting plugins.
-func (lcw *LibraryConfigWatcher[Req, Resp]) applyLibraryConfigToManager(config LibraryConfig) error {
-	// Apply logging configuration
-	if err := lcw.applyLoggingConfig(config.Logging); err != nil {
-		return NewConfigWatcherError("failed to apply logging config", err)
-	}
-
-	// Apply observability configuration
-	if err := lcw.applyObservabilityConfig(config.Observability); err != nil {
-		return NewConfigWatcherError("failed to apply observability config", err)
-	}
-
-	// Apply discovery configuration
-	if err := lcw.applyDiscoveryConfig(config.Discovery); err != nil {
-		return NewConfigWatcherError("failed to apply discovery config", err)
-	}
-
-	// Update default policies for new plugins (doesn't affect existing plugins)
-	lcw.updateDefaultPolicies(config.DefaultPolicies)
-
-	return nil
-}
-
-// applyLibraryConfigWithRollback applies configuration with rollback capability.
-//
-// This function attempts to apply the new configuration and rolls back to
-// the previous configuration if the application fails.
-func (lcw *LibraryConfigWatcher[Req, Resp]) applyLibraryConfigWithRollback(newConfig LibraryConfig) error {
-	// Validate before applying if enabled
-	if lcw.options.ValidateBeforeApply {
-		if err := lcw.validateLibraryConfig(newConfig); err != nil {
-			return NewConfigValidationError("configuration validation failed", err)
-		}
-	}
-
-	// Get current config for potential rollback
-	currentConfig := lcw.currentConfig.Load()
-
-	// Apply new configuration
-	if err := lcw.applyLibraryConfigToManager(newConfig); err != nil {
-		// Rollback if enabled and we have a previous config
-		if lcw.options.RollbackOnFailure && currentConfig != nil {
-			lcw.logger.Info("Rolling back library configuration due to application failure")
-			if rollbackErr := lcw.applyLibraryConfigToManager(*currentConfig); rollbackErr != nil {
-				lcw.logger.Error("Configuration rollback failed", "error", rollbackErr)
-				return NewConfigWatcherError(fmt.Sprintf("config application failed and rollback failed: rollback_error=%v", rollbackErr), err)
-			}
-			lcw.logger.Info("Configuration rollback completed successfully")
-		}
+	if err := expander.expandMetadataConfig(&config.Metadata); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// applyLoggingConfig applies logging configuration changes.
-//
-// This function updates the logging configuration at runtime, allowing
-// dynamic adjustment of log levels and formatting without service restart.
-func (lcw *LibraryConfigWatcher[Req, Resp]) applyLoggingConfig(config LoggingConfig) error {
-	lcw.logger.Info("Applying logging configuration changes",
-		"level", config.Level,
-		"format", config.Format,
-		"structured", config.Structured)
+// envExpander handles environment variable expansion with consistent error handling
+type envExpander struct{}
 
-	// In a full implementation, this would update the actual logger configuration
-	// For now, just log the change
+// expand is a helper for consistent environment variable expansion
+func (e *envExpander) expand(value string) (string, error) {
+	if value == "" {
+		return value, nil
+	}
+	return ExpandEnvironmentVariables(value, EnvConfigOptions{FailOnMissing: false})
+}
 
+// expandField expands a single string field with error context
+func (e *envExpander) expandField(field *string, fieldName string) error {
+	if *field == "" {
+		return nil
+	}
+
+	expanded, err := e.expand(*field)
+	if err != nil {
+		return NewConfigValidationError("failed to expand "+fieldName, err)
+	}
+
+	*field = expanded
 	return nil
 }
 
-// applyObservabilityConfig applies observability configuration changes.
-//
-// This function updates observability settings at runtime, enabling dynamic
-// adjustment of monitoring, metrics, and tracing without service disruption.
-//
-// UNIFIED CONFIGURATION BRIDGE:
-// This function converts ObservabilityRuntimeConfig to ObservabilityConfig
-// and applies it to the Manager, providing seamless hot reload capabilities.
-func (lcw *LibraryConfigWatcher[Req, Resp]) applyObservabilityConfig(config ObservabilityRuntimeConfig) error {
-	lcw.logger.Info("Applying observability configuration changes",
-		"metrics_enabled", config.MetricsEnabled,
-		"tracing_enabled", config.TracingEnabled,
-		"sample_rate", config.TracingSampleRate)
-
-	// Get current manager observability config as base
-	currentConfig := lcw.manager.GetObservabilityConfig()
-
-	// Determine observability level based on runtime configuration
-	level := lcw.determineObservabilityLevel(config)
-
-	// Create updated config by merging runtime changes with existing config
-	updatedConfig := ObservabilityConfig{
-		// Set the computed level
-		Level: level,
-
-		// Preserve existing collectors and providers (don't recreate them)
-		MetricsCollector: currentConfig.MetricsCollector,
-		TracingProvider:  currentConfig.TracingProvider,
-		MetricsPrefix:    currentConfig.MetricsPrefix,
-
-		// Apply runtime configuration changes
-		TracingSampleRate: config.TracingSampleRate,
-		LogLevel:          "info", // Will be updated by applyLoggingConfig
-	}
-
-	// Apply the unified configuration to the manager
-	if err := lcw.manager.ConfigureObservability(updatedConfig); err != nil {
-		return NewConfigWatcherError("failed to apply observability config to manager", err)
-	}
-
-	lcw.logger.Info("Successfully applied observability configuration to manager")
-	return nil
-}
-
-// determineObservabilityLevel determines the appropriate observability level
-// based on the runtime configuration flags.
-func (lcw *LibraryConfigWatcher[Req, Resp]) determineObservabilityLevel(config ObservabilityRuntimeConfig) ObservabilityLevel {
-	// If nothing is enabled, use disabled
-	if !config.MetricsEnabled && !config.TracingEnabled && !config.HealthMetricsEnabled && !config.PerformanceMetricsEnabled {
-		return ObservabilityDisabled
-	}
-
-	// If performance metrics are enabled, use advanced level
-	if config.PerformanceMetricsEnabled {
-		return ObservabilityAdvanced
-	}
-
-	// If tracing is enabled, use standard level
-	if config.TracingEnabled {
-		return ObservabilityStandard
-	}
-
-	// If only basic metrics are enabled, use basic level
-	if config.MetricsEnabled || config.HealthMetricsEnabled {
-		return ObservabilityBasic
-	}
-
-	// Default to disabled
-	return ObservabilityDisabled
-}
-
-// applyDiscoveryConfig applies plugin discovery configuration changes.
-//
-// This function updates discovery settings at runtime, enabling dynamic
-// adjustment of search paths, patterns, and validation rules without restart.
-//
-// UNIFIED DISCOVERY BRIDGE:
-// This function converts DiscoveryRuntimeConfig to DiscoveryConfig and applies
-// it to the Manager's discovery engine for seamless hot reload capabilities.
-func (lcw *LibraryConfigWatcher[Req, Resp]) applyDiscoveryConfig(config DiscoveryRuntimeConfig) error {
-	lcw.logger.Info("Applying discovery configuration changes",
-		"enabled", config.Enabled,
-		"search_paths", config.SearchPaths,
-		"watch_mode", config.WatchMode)
-
-	// Convert allowed transports from strings to TransportType
-	var allowedTransports []TransportType
-	for _, transport := range config.AllowedTransports {
-		allowedTransports = append(allowedTransports, TransportType(transport))
-	}
-
-	// Create extended discovery config with all features
-	extendedConfig := ExtendedDiscoveryConfig{
-		DiscoveryConfig: DiscoveryConfig{
-			Enabled:     config.Enabled,
-			Directories: config.SearchPaths,
-			Patterns:    config.FilePatterns,
-			WatchMode:   config.WatchMode,
-		},
-		// Extended fields
-		SearchPaths:          config.SearchPaths,
-		FilePatterns:         config.FilePatterns,
-		MaxDepth:             config.MaxDepth,
-		RequiredCapabilities: config.RequiredCapabilities,
-		AllowedTransports:    allowedTransports,
-		DiscoveryTimeout:     config.ScanInterval, // Map ScanInterval to DiscoveryTimeout
-	}
-
-	// Apply the discovery configuration to the manager
-	// Note: This is optional - if ConfigureDiscovery is not implemented, we skip it
-	if discoveryConfigurer, ok := interface{}(lcw.manager).(interface {
-		ConfigureDiscovery(ExtendedDiscoveryConfig) error
-	}); ok {
-		if err := discoveryConfigurer.ConfigureDiscovery(extendedConfig); err != nil {
-			// Check if this is the "not yet implemented" error - if so, skip it
-			if goErr, ok := err.(*errors.Error); ok && goErr.Code == "REGISTRY_1906" {
-				lcw.logger.Debug("Discovery runtime configuration not yet implemented, skipping")
-			} else {
-				return NewConfigWatcherError("failed to apply discovery config to manager", err)
-			}
-		} else {
-			lcw.logger.Info("Successfully applied discovery configuration to manager")
+// expandMap expands all values in a string map
+func (e *envExpander) expandMap(m map[string]string, mapName string) error {
+	for key, value := range m {
+		expanded, err := e.expand(value)
+		if err != nil {
+			return NewConfigValidationError("failed to expand "+mapName+" "+key, err)
 		}
-	} else {
-		lcw.logger.Debug("Manager does not support runtime discovery configuration updates, skipping")
+		m[key] = expanded
 	}
-
 	return nil
 }
 
-// updateDefaultPolicies updates default policies for new plugins.
-//
-// This function updates the default policies that will be applied to newly
-// registered plugins. It doesn't affect existing plugins.
-func (lcw *LibraryConfigWatcher[Req, Resp]) updateDefaultPolicies(policies DefaultPoliciesConfig) {
-	lcw.logger.Info("Updating default policies for new plugins")
+// expandLoggingConfig expands logging configuration fields
+func (e *envExpander) expandLoggingConfig(logging *LoggingConfig) error {
+	if err := e.expandField(&logging.Level, "logging level"); err != nil {
+		return err
+	}
 
-	// Update manager's default configurations
-	// This affects only newly registered plugins
-	lcw.manager.config.DefaultRetry = policies.Retry
-	lcw.manager.config.DefaultCircuitBreaker = policies.CircuitBreaker
-	lcw.manager.config.DefaultHealthCheck = policies.HealthCheck
-	lcw.manager.config.DefaultConnection = policies.Connection
-	lcw.manager.config.DefaultRateLimit = policies.RateLimit
+	if err := e.expandField(&logging.Format, "logging format"); err != nil {
+		return err
+	}
+
+	return e.expandMap(logging.ComponentLevels, "component log level")
 }
 
-// loggingConfigChanged checks if logging configuration has changed.
-//
-// This function performs detailed comparison of logging settings to determine
-// if any runtime adjustments are needed.
-func (lcw *LibraryConfigWatcher[Req, Resp]) loggingConfigChanged(old, new LoggingConfig) bool {
-	return old.Level != new.Level ||
-		old.Format != new.Format ||
-		old.Structured != new.Structured ||
-		old.IncludeCaller != new.IncludeCaller ||
-		old.IncludeStackTrace != new.IncludeStackTrace ||
-		!stringMapsEqual(old.ComponentLevels, new.ComponentLevels)
+// expandEnvironmentConfig expands environment configuration fields
+func (e *envExpander) expandEnvironmentConfig(env *EnvironmentConfig) error {
+	if err := e.expandField(&env.VariablePrefix, "variable prefix"); err != nil {
+		return err
+	}
+
+	if err := e.expandMap(env.Overrides, "override"); err != nil {
+		return err
+	}
+
+	return e.expandMap(env.Defaults, "default")
 }
+
+// expandMetadataConfig expands metadata configuration fields
+func (e *envExpander) expandMetadataConfig(metadata *ConfigMetadata) error {
+	if err := e.expandField(&metadata.Environment, "metadata environment"); err != nil {
+		return err
+	}
+
+	return e.expandField(&metadata.Description, "metadata description")
+}
+
+// REMOVED: expandSingleVariable - replaced with local helper function in expandEnvironmentVariables
+
+// validateLibraryConfig validates the complete LibraryConfig structure
+//
+// This function orchestrates validation of all configuration sections using
+// a consolidated validation system that maintains comprehensive validation
+// while providing clearer error reporting and better maintainability.
+//
+// Validation order:
+//  1. Field-level constraints (types, ranges, enums)
+//  2. Business rule validation (cross-field dependencies)
+//  3. Security constraint validation (paths, policies)
+//
+// Returns the first validation error encountered, with detailed context
+// about which field and rule failed for easier debugging.
+// REMOVED: validateLibraryConfig wrapper - replaced with direct lcw.validator.ValidateLibraryConfig calls
+
+// REMOVED: applyLibraryConfigToManager wrapper - replaced with direct lcw.applicator.ApplyLibraryConfig calls
+
+// REMOVED: applyLibraryConfigWithRollback wrapper - logic inlined in handleLibraryConfigChange for clarity
+
+// MOVED: applyLoggingConfig → config_applicator.go (SOC principle)
+
+// MOVED: applyObservabilityConfig + determineObservabilityLevel → config_applicator.go (SOC principle)
+
+// MOVED: applyDiscoveryConfig → config_applicator.go (SOC principle)
+
+// MOVED: updateDefaultPolicies → config_applicator.go (SOC principle)
+
+// REMOVED: loggingConfigChanged - redundant with Argus native change detection

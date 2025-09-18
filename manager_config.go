@@ -17,45 +17,79 @@ import (
 
 // LoadFromConfig implements PluginManager.LoadFromConfig
 func (m *Manager[Req, Resp]) LoadFromConfig(config ManagerConfig) error {
+	// Validate and apply configuration
+	if err := m.validateAndApplyConfig(config); err != nil {
+		return err
+	}
+
+	// Update security configuration if provided
+	m.updateSecurityConfiguration(config.Security)
+
+	// Load plugins from configuration
+	if err := m.loadPluginsFromConfig(config.Plugins); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateAndApplyConfig validates and applies the manager configuration
+func (m *Manager[Req, Resp]) validateAndApplyConfig(config ManagerConfig) error {
 	if err := config.Validate(); err != nil {
 		return NewConfigValidationError("invalid configuration", err)
 	}
 
 	config.ApplyDefaults()
-	m.config = config
 
-	// Update security configuration if provided
-	if config.Security.Enabled {
-		if m.securityValidator != nil {
-			if err := m.securityValidator.UpdateConfig(config.Security); err != nil {
-				m.logger.Warn("Failed to update security config", "error", err)
-			} else {
-				if err := m.securityValidator.Enable(); err != nil {
-					m.logger.Warn("Failed to enable security validator", "error", err)
-				}
+	// Protect config assignment with mutex
+	m.mu.Lock()
+	m.config = config
+	m.mu.Unlock()
+
+	return nil
+}
+
+// updateSecurityConfiguration updates the security validator configuration
+func (m *Manager[Req, Resp]) updateSecurityConfiguration(securityConfig SecurityConfig) {
+	if securityConfig.Enabled && m.securityValidator != nil {
+		if err := m.securityValidator.UpdateConfig(securityConfig); err != nil {
+			m.logger.Warn("Failed to update security config", "error", err)
+		} else {
+			if err := m.securityValidator.Enable(); err != nil {
+				m.logger.Warn("Failed to enable security validator", "error", err)
 			}
 		}
 	}
+}
 
-	// Load plugins from configuration
-	for _, pluginConfig := range config.Plugins {
+// loadPluginsFromConfig loads and registers plugins from configuration
+func (m *Manager[Req, Resp]) loadPluginsFromConfig(pluginConfigs []PluginConfig) error {
+	for _, pluginConfig := range pluginConfigs {
 		if !pluginConfig.Enabled {
 			continue
 		}
 
-		factory, exists := m.factories[pluginConfig.Type]
-		if !exists {
-			return NewFactoryError(pluginConfig.Type, "no factory registered for plugin type", nil)
+		if err := m.createAndRegisterPlugin(pluginConfig); err != nil {
+			return err
 		}
+	}
+	return nil
+}
 
-		plugin, err := factory.CreatePlugin(pluginConfig)
-		if err != nil {
-			return NewFactoryError(pluginConfig.Type, fmt.Sprintf("failed to create plugin %s", pluginConfig.Name), err)
-		}
+// createAndRegisterPlugin creates and registers a single plugin
+func (m *Manager[Req, Resp]) createAndRegisterPlugin(pluginConfig PluginConfig) error {
+	factory, exists := m.factories[pluginConfig.Type]
+	if !exists {
+		return NewFactoryError(pluginConfig.Type, "no factory registered for plugin type", nil)
+	}
 
-		if err := m.RegisterWithConfig(plugin, pluginConfig); err != nil {
-			return NewRegistryError(fmt.Sprintf("failed to register plugin %s", pluginConfig.Name), err)
-		}
+	plugin, err := factory.CreatePlugin(pluginConfig)
+	if err != nil {
+		return NewFactoryError(pluginConfig.Type, fmt.Sprintf("failed to create plugin %s", pluginConfig.Name), err)
+	}
+
+	if err := m.RegisterWithConfig(plugin, pluginConfig); err != nil {
+		return NewRegistryError(fmt.Sprintf("failed to register plugin %s", pluginConfig.Name), err)
 	}
 
 	return nil

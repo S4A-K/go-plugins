@@ -42,7 +42,16 @@ func (m *Manager[Req, Resp]) monitorPluginHealth(pluginName string) {
 		return
 	}
 
-	ticker := time.NewTicker(30 * time.Second) // TODO: use config
+	// Use configured health check interval, fallback to 30 seconds if not set
+	m.mu.RLock()
+	interval := m.config.DefaultHealthCheck.Interval
+	m.mu.RUnlock()
+
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -62,8 +71,9 @@ func (m *Manager[Req, Resp]) monitorPluginHealth(pluginName string) {
 			m.mu.Unlock()
 
 			// Record observability metrics
-			// TODO: Add health check metrics to ObservabilityManager
-			// m.recordHealthCheckMetrics(pluginName, status, duration)
+			if m.observabilityManager != nil {
+				m.observabilityManager.RecordHealthCheckMetrics(pluginName, status, duration)
+			}
 
 			if status.Status != StatusHealthy {
 				m.metrics.HealthCheckFailures.Add(1)

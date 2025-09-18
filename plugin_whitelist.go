@@ -204,7 +204,22 @@ func NewSecurityValidator(config SecurityConfig, logger Logger) (*SecurityValida
 		logger = DefaultLogger()
 	}
 
-	// Apply defaults
+	// Apply configuration defaults
+	config = applySecurityConfigDefaults(config)
+
+	// Create validator with basic setup
+	validator := createSecurityValidator(config, logger)
+
+	// Initialize validator components
+	if err := initializeValidatorComponents(validator); err != nil {
+		return nil, err
+	}
+
+	return validator, nil
+}
+
+// applySecurityConfigDefaults applies default values to security configuration
+func applySecurityConfigDefaults(config SecurityConfig) SecurityConfig {
 	if config.HashAlgorithm == "" {
 		config.HashAlgorithm = HashAlgorithmSHA256
 	}
@@ -214,7 +229,11 @@ func NewSecurityValidator(config SecurityConfig, logger Logger) (*SecurityValida
 	if config.MaxFileSize == 0 {
 		config.MaxFileSize = 100 * 1024 * 1024 // 100MB default
 	}
+	return config
+}
 
+// createSecurityValidator creates the basic validator structure
+func createSecurityValidator(config SecurityConfig, logger Logger) *SecurityValidator {
 	validator := &SecurityValidator{
 		config:  config,
 		logger:  logger,
@@ -225,21 +244,26 @@ func NewSecurityValidator(config SecurityConfig, logger Logger) (*SecurityValida
 	// Initialize Argus integration
 	validator.argusIntegration = NewSecurityArgusIntegration(validator, logger)
 
+	return validator
+}
+
+// initializeValidatorComponents initializes validator components
+func initializeValidatorComponents(validator *SecurityValidator) error {
 	// Load initial whitelist if enabled
-	if config.Enabled && config.WhitelistFile != "" {
+	if validator.config.Enabled && validator.config.WhitelistFile != "" {
 		if err := validator.loadWhitelist(); err != nil {
-			return nil, NewWhitelistError("failed to load initial whitelist", err)
+			return NewWhitelistError("failed to load initial whitelist", err)
 		}
 	}
 
 	// Setup audit logging
-	if config.AuditConfig.Enabled && config.AuditConfig.AuditFile != "" {
+	if validator.config.AuditConfig.Enabled && validator.config.AuditConfig.AuditFile != "" {
 		if err := validator.setupAuditLogging(); err != nil {
-			logger.Warn("Failed to setup security audit logging", "error", err)
+			validator.logger.Warn("Failed to setup security audit logging", "error", err)
 		}
 	}
 
-	return validator, nil
+	return nil
 }
 
 // setupAuditLogging configures Argus audit logging for security events
@@ -295,11 +319,13 @@ func (sv *SecurityValidator) Enable() error {
 	sv.logger.Info("Plugin security validator enabled", "policy", sv.config.Policy.String())
 
 	// Audit the enablement
-	sv.auditSecurityEvent("security_validator_enabled", map[string]interface{}{
-		"policy":         sv.config.Policy.String(),
-		"whitelist_file": sv.config.WhitelistFile,
-		"watch_config":   sv.config.WatchConfig,
-	})
+	if sv.shouldAudit() {
+		sv.auditLogger.LogSecurityEvent("security_validator_enabled", "Plugin security validation event", map[string]interface{}{
+			"policy":         sv.config.Policy.String(),
+			"whitelist_file": sv.config.WhitelistFile,
+			"watch_config":   sv.config.WatchConfig,
+		})
+	}
 
 	return nil
 }
@@ -324,9 +350,11 @@ func (sv *SecurityValidator) Disable() error {
 	sv.logger.Info("Plugin security validator disabled")
 
 	// Audit the disablement
-	sv.auditSecurityEvent("security_validator_disabled", map[string]interface{}{
-		"final_stats": sv.stats,
-	})
+	if sv.shouldAudit() {
+		sv.auditLogger.LogSecurityEvent("security_validator_disabled", "Plugin security validation event", map[string]interface{}{
+			"final_stats": sv.stats,
+		})
+	}
 
 	return nil
 }
@@ -398,39 +426,77 @@ func (sv *SecurityValidator) performValidation(pluginConfig PluginConfig, plugin
 	var violations []SecurityViolation
 	timestamp := time.Now()
 
+	// Check basic preconditions
+	whitelistEntry, earlyViolation := sv.validateBasicPreconditions(pluginConfig, timestamp)
+	if earlyViolation != nil {
+		return append(violations, *earlyViolation), nil
+	}
+
+	// Perform all validation checks
+	if err := sv.performAllValidationChecks(pluginConfig, pluginPath, whitelistEntry, &violations, timestamp); err != nil {
+		return violations, err
+	}
+
+	return violations, nil
+}
+
+// validateBasicPreconditions checks whitelist loading and plugin existence
+func (sv *SecurityValidator) validateBasicPreconditions(pluginConfig PluginConfig, timestamp time.Time) (PluginHashInfo, *SecurityViolation) {
 	// Check if whitelist is loaded
 	if sv.whitelist == nil {
-		violations = append(violations, SecurityViolation{
+		violation := SecurityViolation{
 			Type:      "whitelist_not_loaded",
 			Plugin:    pluginConfig.Name,
 			Reason:    "Security whitelist not loaded",
 			Timestamp: timestamp,
-		})
-		return violations, nil
+		}
+		return PluginHashInfo{}, &violation
 	}
 
 	// Check if plugin is in whitelist
 	whitelistEntry, exists := sv.whitelist.Plugins[pluginConfig.Name]
 	if !exists {
-		violations = append(violations, SecurityViolation{
+		violation := SecurityViolation{
 			Type:      "plugin_not_whitelisted",
 			Plugin:    pluginConfig.Name,
 			Reason:    "Plugin not found in security whitelist",
 			Timestamp: timestamp,
-		})
-		return violations, nil
+		}
+		return PluginHashInfo{}, &violation
 	}
 
+	return whitelistEntry, nil
+}
+
+// performAllValidationChecks performs all security validation checks
+func (sv *SecurityValidator) performAllValidationChecks(pluginConfig PluginConfig, pluginPath string, whitelistEntry PluginHashInfo, violations *[]SecurityViolation, timestamp time.Time) error {
 	// Validate hash if file path provided
 	if pluginPath != "" {
-		if err := sv.validatePluginHash(pluginPath, whitelistEntry, &violations, timestamp); err != nil {
-			return violations, NewHashValidationError(pluginPath, err)
+		if err := sv.validatePluginHash(pluginPath, whitelistEntry, violations, timestamp); err != nil {
+			return NewHashValidationError(pluginPath, err)
 		}
 	}
 
 	// Validate plugin type
+	sv.validatePluginType(pluginConfig, whitelistEntry, violations, timestamp)
+
+	// Validate file size constraints
+	if err := sv.validateFileSizeIfNeeded(pluginPath, whitelistEntry, violations, timestamp); err != nil {
+		return NewSecurityValidationError("file size validation error", err)
+	}
+
+	// Validate allowed endpoints
+	if err := sv.validateEndpointsIfNeeded(pluginConfig, whitelistEntry, violations, timestamp); err != nil {
+		return NewSecurityValidationError("endpoint validation error", err)
+	}
+
+	return nil
+}
+
+// validatePluginType validates the plugin type
+func (sv *SecurityValidator) validatePluginType(pluginConfig PluginConfig, whitelistEntry PluginHashInfo, violations *[]SecurityViolation, timestamp time.Time) {
 	if whitelistEntry.Type != "" && whitelistEntry.Type != pluginConfig.Type {
-		violations = append(violations, SecurityViolation{
+		*violations = append(*violations, SecurityViolation{
 			Type:      "type_mismatch",
 			Plugin:    pluginConfig.Name,
 			Reason:    "Plugin type does not match whitelist",
@@ -439,22 +505,22 @@ func (sv *SecurityValidator) performValidation(pluginConfig PluginConfig, plugin
 			Timestamp: timestamp,
 		})
 	}
+}
 
-	// Validate file size constraints
+// validateFileSizeIfNeeded validates file size if constraints exist
+func (sv *SecurityValidator) validateFileSizeIfNeeded(pluginPath string, whitelistEntry PluginHashInfo, violations *[]SecurityViolation, timestamp time.Time) error {
 	if pluginPath != "" && (whitelistEntry.MaxFileSize > 0 || sv.config.MaxFileSize > 0) {
-		if err := sv.validateFileSize(pluginPath, whitelistEntry, &violations, timestamp); err != nil {
-			return violations, NewSecurityValidationError("file size validation error", err)
-		}
+		return sv.validateFileSize(pluginPath, whitelistEntry, violations, timestamp)
 	}
+	return nil
+}
 
-	// Validate allowed endpoints
+// validateEndpointsIfNeeded validates endpoints if configured
+func (sv *SecurityValidator) validateEndpointsIfNeeded(pluginConfig PluginConfig, whitelistEntry PluginHashInfo, violations *[]SecurityViolation, timestamp time.Time) error {
 	if len(whitelistEntry.AllowedEndpoints) > 0 {
-		if err := sv.validateEndpoints(pluginConfig, whitelistEntry, &violations, timestamp); err != nil {
-			return violations, NewSecurityValidationError("endpoint validation error", err)
-		}
+		return sv.validateEndpoints(pluginConfig, whitelistEntry, violations, timestamp)
 	}
-
-	return violations, nil
+	return nil
 }
 
 // validatePluginHash validates the plugin file hash against the whitelist
@@ -468,18 +534,12 @@ func (sv *SecurityValidator) validatePluginHash(pluginPath string, entry PluginH
 	// Compare with expected hash
 	if actualHash != entry.Hash {
 		sv.stats.HashMismatches++
-		*violations = append(*violations, SecurityViolation{
-			Type:      "hash_mismatch",
-			Plugin:    entry.Name,
-			Reason:    "Plugin file hash does not match whitelist",
-			Expected:  entry.Hash,
-			Actual:    actualHash,
-			Timestamp: timestamp,
-			Context: map[string]interface{}{
+		sv.addSecurityViolation(violations, "hash_mismatch", entry.Name,
+			"Plugin file hash does not match whitelist", entry.Hash, actualHash, timestamp,
+			map[string]interface{}{
 				"file_path": pluginPath,
 				"algorithm": string(entry.Algorithm),
-			},
-		})
+			})
 	}
 
 	return nil
@@ -499,19 +559,14 @@ func (sv *SecurityValidator) validateFileSize(pluginPath string, entry PluginHas
 	}
 
 	if maxSize > 0 && fileSize > maxSize {
-		*violations = append(*violations, SecurityViolation{
-			Type:      "file_size_exceeded",
-			Plugin:    entry.Name,
-			Reason:    fmt.Sprintf("Plugin file size (%d bytes) exceeds maximum allowed (%d bytes)", fileSize, maxSize),
-			Expected:  fmt.Sprintf("%d", maxSize),
-			Actual:    fmt.Sprintf("%d", fileSize),
-			Timestamp: timestamp,
-			Context: map[string]interface{}{
+		sv.addSecurityViolation(violations, "file_size_exceeded", entry.Name,
+			fmt.Sprintf("Plugin file size (%d bytes) exceeds maximum allowed (%d bytes)", fileSize, maxSize),
+			fmt.Sprintf("%d", maxSize), fmt.Sprintf("%d", fileSize), timestamp,
+			map[string]interface{}{
 				"file_path": pluginPath,
 				"file_size": fileSize,
 				"max_size":  maxSize,
-			},
-		})
+			})
 	}
 
 	return nil
@@ -533,21 +588,34 @@ func (sv *SecurityValidator) validateEndpoints(pluginConfig PluginConfig, entry 
 	}
 
 	if !allowed {
-		*violations = append(*violations, SecurityViolation{
-			Type:      "endpoint_not_allowed",
-			Plugin:    entry.Name,
-			Reason:    "Plugin endpoint not in allowed endpoints list",
-			Expected:  fmt.Sprintf("one of: %v", entry.AllowedEndpoints),
-			Actual:    pluginConfig.Endpoint,
-			Timestamp: timestamp,
-			Context: map[string]interface{}{
+		sv.addSecurityViolation(violations, "endpoint_not_allowed", entry.Name,
+			"Plugin endpoint not in allowed endpoints list",
+			fmt.Sprintf("one of: %v", entry.AllowedEndpoints), pluginConfig.Endpoint, timestamp,
+			map[string]interface{}{
 				"endpoint":          pluginConfig.Endpoint,
 				"allowed_endpoints": entry.AllowedEndpoints,
-			},
-		})
+			})
 	}
 
 	return nil
+}
+
+// addSecurityViolation creates and appends a security violation with consistent structure
+func (sv *SecurityValidator) addSecurityViolation(violations *[]SecurityViolation, violationType, pluginName, reason, expected, actual string, timestamp time.Time, context map[string]interface{}) {
+	*violations = append(*violations, SecurityViolation{
+		Type:      violationType,
+		Plugin:    pluginName,
+		Reason:    reason,
+		Expected:  expected,
+		Actual:    actual,
+		Timestamp: timestamp,
+		Context:   context,
+	})
+}
+
+// shouldAudit returns true if audit logging is enabled and available
+func (sv *SecurityValidator) shouldAudit() bool {
+	return sv.auditLogger != nil && sv.config.AuditConfig.Enabled
 }
 
 // calculateFileHash calculates the hash of a file using the configured algorithm
@@ -562,7 +630,11 @@ func (sv *SecurityValidator) calculateFileHash(filePath string) (string, error) 
 	if err != nil {
 		return "", NewFilePermissionError(filePath, err)
 	}
-	defer func() { _ = file.Close() }() // Ignore close error
+	defer func() {
+		if err := file.Close(); err != nil {
+			sv.logger.Warn("Failed to close file during hash calculation", "file", filePath, "error", err)
+		}
+	}()
 
 	switch sv.config.HashAlgorithm {
 	case HashAlgorithmSHA256:
@@ -635,16 +707,6 @@ func (sv *SecurityValidator) validateWhitelistStructure(whitelist *PluginWhiteli
 	return nil
 }
 
-// auditSecurityEvent logs a security event to the audit trail
-func (sv *SecurityValidator) auditSecurityEvent(event string, context map[string]interface{}) {
-	if sv.auditLogger == nil || !sv.config.AuditConfig.Enabled {
-		return
-	}
-
-	// LogSecurityEvent expects (event, description, context)
-	sv.auditLogger.LogSecurityEvent(event, "Plugin security validation event", context)
-}
-
 // auditPluginValidation logs plugin validation results
 func (sv *SecurityValidator) auditPluginValidation(pluginConfig PluginConfig, result *ValidationResult, violations []SecurityViolation) {
 	if !sv.config.AuditConfig.Enabled {
@@ -679,7 +741,9 @@ func (sv *SecurityValidator) auditPluginValidation(pluginConfig PluginConfig, re
 		eventType = "plugin_rejected"
 	}
 
-	sv.auditSecurityEvent(eventType, context)
+	if sv.shouldAudit() {
+		sv.auditLogger.LogSecurityEvent(eventType, "Plugin security validation event", context)
+	}
 }
 
 // GetStats returns current security validation statistics
@@ -708,19 +772,14 @@ func (sv *SecurityValidator) GetWhitelistInfo() map[string]interface{} {
 	sv.mutex.RLock()
 	defer sv.mutex.RUnlock()
 
-	if sv.whitelist == nil {
-		return map[string]interface{}{
-			"loaded": false,
-		}
+	result := map[string]interface{}{"loaded": sv.whitelist != nil}
+	if sv.whitelist != nil {
+		result["version"] = sv.whitelist.Version
+		result["plugin_count"] = len(sv.whitelist.Plugins)
+		result["updated_at"] = sv.whitelist.UpdatedAt
+		result["hash_algorithm"] = sv.whitelist.HashAlgorithm
 	}
-
-	return map[string]interface{}{
-		"loaded":         true,
-		"version":        sv.whitelist.Version,
-		"plugin_count":   len(sv.whitelist.Plugins),
-		"updated_at":     sv.whitelist.UpdatedAt,
-		"hash_algorithm": sv.whitelist.HashAlgorithm,
-	}
+	return result
 }
 
 // ReloadWhitelist manually reloads the whitelist from file
@@ -736,10 +795,12 @@ func (sv *SecurityValidator) ReloadWhitelist() error {
 		return fmt.Errorf("failed to reload whitelist: %w", err)
 	}
 
-	sv.auditSecurityEvent("whitelist_reloaded", map[string]interface{}{
-		"file":    sv.config.WhitelistFile,
-		"plugins": len(sv.whitelist.Plugins),
-	})
+	if sv.shouldAudit() {
+		sv.auditLogger.LogSecurityEvent("whitelist_reloaded", "Plugin security validation event", map[string]interface{}{
+			"file":    sv.config.WhitelistFile,
+			"plugins": len(sv.whitelist.Plugins),
+		})
+	}
 
 	return nil
 }
@@ -756,7 +817,9 @@ func (sv *SecurityValidator) UpdateConfig(newConfig SecurityConfig) error {
 	// Restart monitoring if whitelist file changed
 	if oldConfig.WhitelistFile != newConfig.WhitelistFile {
 		if sv.argusIntegration.IsRunning() {
-			_ = sv.argusIntegration.DisableWatching() // Ignore error during config update
+			if err := sv.argusIntegration.DisableWatching(); err != nil {
+				sv.logger.Warn("Failed to disable watching during config update", "error", err)
+			}
 		}
 		if newConfig.WatchConfig && newConfig.WhitelistFile != "" {
 			if err := sv.argusIntegration.EnableWatchingWithArgus(newConfig.WhitelistFile, newConfig.AuditConfig.AuditFile); err != nil {
@@ -765,12 +828,14 @@ func (sv *SecurityValidator) UpdateConfig(newConfig SecurityConfig) error {
 		}
 	}
 
-	sv.auditSecurityEvent("config_updated", map[string]interface{}{
-		"old_policy": oldConfig.Policy.String(),
-		"new_policy": newConfig.Policy.String(),
-		"old_file":   oldConfig.WhitelistFile,
-		"new_file":   newConfig.WhitelistFile,
-	})
+	if sv.shouldAudit() {
+		sv.auditLogger.LogSecurityEvent("config_updated", "Plugin security validation event", map[string]interface{}{
+			"old_policy": oldConfig.Policy.String(),
+			"new_policy": newConfig.Policy.String(),
+			"old_file":   oldConfig.WhitelistFile,
+			"new_file":   newConfig.WhitelistFile,
+		})
+	}
 
 	return nil
 }

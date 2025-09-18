@@ -86,52 +86,6 @@ type RegistryConfig struct {
 	Logger Logger `json:"-" yaml:"-"`
 }
 
-// PluginClient manages a single plugin instance on the host side.
-//
-// Each PluginClient represents a connection to a subprocess plugin instance.
-// It handles the communication, health checking, and provides a unified
-// interface for making requests to the plugin.
-type PluginClient struct {
-	// Identity
-	ID   string
-	Name string
-	Type string
-
-	// Configuration
-	config     PluginConfig
-	executable string
-	args       []string
-
-	// Communication
-	bridge     *CommunicationBridge
-	subprocess *SubprocessPlugin[any, any]
-
-	// State management
-	status    PluginStatus
-	startTime time.Time
-	lastPing  time.Time
-	mutex     sync.RWMutex
-
-	// Lifecycle
-	ctx    context.Context
-	cancel context.CancelFunc
-	logger Logger
-
-	// Health monitoring
-	healthChecker *HealthChecker
-}
-
-// ClientStats provides statistics about a plugin client.
-type ClientStats struct {
-	Status       PluginStatus  `json:"status"`
-	StartTime    time.Time     `json:"start_time"`
-	LastPing     time.Time     `json:"last_ping"`
-	Uptime       time.Duration `json:"uptime"`
-	RequestCount int64         `json:"request_count"`
-	ErrorCount   int64         `json:"error_count"`
-	LastError    string        `json:"last_error,omitempty"`
-}
-
 // RegistryStats provides overall registry statistics.
 type RegistryStats struct {
 	TotalClients    int                    `json:"total_clients"`
@@ -144,38 +98,10 @@ type RegistryStats struct {
 
 // NewPluginRegistry creates a new plugin registry.
 func NewPluginRegistry(config RegistryConfig) *PluginRegistry {
-	if config.Logger == nil {
-		config.Logger = DefaultLogger()
-	}
-
-	if config.MaxClients == 0 {
-		config.MaxClients = 100
-	}
-
-	if config.ClientTimeout == 0 {
-		config.ClientTimeout = 30 * time.Second
-	}
-
-	if config.DiscoveryInterval == 0 {
-		config.DiscoveryInterval = 60 * time.Second
-	}
+	setConfigDefaults(&config)
 
 	ctx, cancel := context.WithCancel(context.Background())
-
-	// Set default drain options if not provided
-	if config.DrainOptions.DrainTimeout == 0 {
-		config.DrainOptions.DrainTimeout = 30 * time.Second
-	}
-
-	// Initialize observability with default configuration
-	observabilityConfig := DefaultObservabilityConfig()
-	metricsCollector := observabilityConfig.MetricsCollector
-
-	// Create common metrics if advanced features are supported
-	var commonMetrics *CommonPluginMetrics
-	if metricsCollector.CounterWithLabels("test", "test") != nil {
-		commonMetrics = CreateCommonPluginMetrics(metricsCollector)
-	}
+	observabilityConfig, metricsCollector, commonMetrics := initializeObservability()
 
 	return &PluginRegistry{
 		config:              config,
@@ -190,6 +116,39 @@ func NewPluginRegistry(config RegistryConfig) *PluginRegistry {
 		ctx:                 ctx,
 		cancel:              cancel,
 	}
+}
+
+// setConfigDefaults sets default values for unspecified config fields.
+func setConfigDefaults(config *RegistryConfig) {
+	if config.Logger == nil {
+		config.Logger = DefaultLogger()
+	}
+	if config.MaxClients == 0 {
+		config.MaxClients = 100
+	}
+	if config.ClientTimeout == 0 {
+		config.ClientTimeout = 30 * time.Second
+	}
+	if config.DiscoveryInterval == 0 {
+		config.DiscoveryInterval = 60 * time.Second
+	}
+	if config.DrainOptions.DrainTimeout == 0 {
+		config.DrainOptions.DrainTimeout = 30 * time.Second
+	}
+}
+
+// initializeObservability initializes observability components with default configuration.
+func initializeObservability() (ObservabilityConfig, MetricsCollector, *CommonPluginMetrics) {
+	observabilityConfig := DefaultObservabilityConfig()
+	metricsCollector := observabilityConfig.MetricsCollector
+
+	// Create common metrics if advanced features are supported
+	var commonMetrics *CommonPluginMetrics
+	if metricsCollector.CounterWithLabels("test", "test") != nil {
+		commonMetrics = CreateCommonPluginMetrics(metricsCollector)
+	}
+
+	return observabilityConfig, metricsCollector, commonMetrics
 }
 
 // Start initializes the plugin registry and begins discovery.
@@ -240,22 +199,12 @@ func (pr *PluginRegistry) StopWithContext(ctx context.Context) error {
 
 	// Begin graceful shutdown phase
 	pr.draining = true
-
-	// Cancel registry context
 	pr.cancel()
 
-	// Perform graceful draining for all clients
-	drainErrors := pr.performGracefulDraining(ctx)
-
-	// Stop all clients after draining
-	pr.clientMutex.Lock()
-	var stopErrors []error
-	for id, client := range pr.clients {
-		if err := client.Stop(); err != nil {
-			stopErrors = append(stopErrors, NewClientError(id, "failed to stop client", err))
-		}
-	}
-	pr.clientMutex.Unlock()
+	// Perform graceful draining and stop all clients
+	var allErrors []error
+	allErrors = append(allErrors, pr.performGracefulDraining(ctx)...)
+	allErrors = append(allErrors, pr.stopAllClients()...)
 
 	// Stop discovery engine (no explicit stop method needed)
 	if pr.discoveryEngine != nil {
@@ -265,10 +214,27 @@ func (pr *PluginRegistry) StopWithContext(ctx context.Context) error {
 	pr.running = false
 	pr.draining = false
 
-	// Combine all errors
-	allErrors := append(drainErrors, stopErrors...)
-	if len(allErrors) > 0 {
-		return NewRegistryError(fmt.Sprintf("errors during registry shutdown: %v", allErrors), nil)
+	return pr.handleShutdownErrors(allErrors)
+}
+
+// stopAllClients stops all registered clients and returns any errors.
+func (pr *PluginRegistry) stopAllClients() []error {
+	pr.clientMutex.Lock()
+	defer pr.clientMutex.Unlock()
+
+	var errors []error
+	for id, client := range pr.clients {
+		if err := client.Stop(); err != nil {
+			errors = append(errors, NewClientError(id, "failed to stop client", err))
+		}
+	}
+	return errors
+}
+
+// handleShutdownErrors processes shutdown errors and returns appropriate error or nil.
+func (pr *PluginRegistry) handleShutdownErrors(errors []error) error {
+	if len(errors) > 0 {
+		return NewRegistryError(fmt.Sprintf("errors during registry shutdown: %v", errors), nil)
 	}
 
 	pr.logger.Info("Plugin registry stopped successfully")
@@ -573,129 +539,6 @@ type AsyncResult struct {
 	Error  error
 }
 
-// ShutdownCoordinator manages coordinated shutdown of the entire plugin system.
-type ShutdownCoordinator struct {
-	registry *PluginRegistry
-	logger   Logger
-}
-
-// NewShutdownCoordinator creates a new shutdown coordinator.
-func NewShutdownCoordinator(registry *PluginRegistry) *ShutdownCoordinator {
-	return &ShutdownCoordinator{
-		registry: registry,
-		logger:   registry.logger,
-	}
-}
-
-// GracefulShutdown performs a coordinated graceful shutdown of the entire system.
-// It follows the proper order: draining -> clients -> protocols -> processes.
-func (sc *ShutdownCoordinator) GracefulShutdown(ctx context.Context) error {
-	sc.logger.Info("Starting coordinated graceful shutdown")
-
-	// Phase 1: Start draining (stop accepting new requests)
-	if err := sc.registry.StartDraining(); err != nil {
-		sc.logger.Warn("Failed to start draining", "error", err)
-	}
-
-	// Phase 2: Wait for active requests to complete or timeout
-	activeRequests := sc.registry.GetActiveRequestsCount()
-	totalActive := int64(0)
-	for _, count := range activeRequests {
-		totalActive += count
-	}
-
-	if totalActive > 0 {
-		sc.logger.Info("Waiting for active requests to complete",
-			"total_active", totalActive,
-			"per_client", activeRequests)
-	}
-
-	// Phase 3: Perform graceful registry shutdown
-	if err := sc.registry.StopWithContext(ctx); err != nil {
-		sc.logger.Error("Registry shutdown encountered errors", "error", err)
-		return NewRegistryError("registry shutdown failed", err)
-	}
-
-	sc.logger.Info("Coordinated graceful shutdown completed successfully")
-	return nil
-}
-
-// ForceShutdown performs an immediate shutdown with minimal cleanup.
-// Use only when graceful shutdown fails or in emergency situations.
-func (sc *ShutdownCoordinator) ForceShutdown() error {
-	sc.logger.Warn("Performing force shutdown")
-
-	// Force cancel all requests
-	activeRequests := sc.registry.GetActiveRequestsCount()
-	totalCanceled := 0
-
-	for clientName := range activeRequests {
-		canceled := sc.registry.requestTracker.ForceCancel(clientName)
-		totalCanceled += canceled
-		if canceled > 0 {
-			sc.logger.Info("Force canceled requests",
-				"client", clientName,
-				"canceled", canceled)
-		}
-	}
-
-	// Force stop registry
-	if err := sc.registry.Stop(); err != nil {
-		sc.logger.Error("Force shutdown encountered errors", "error", err)
-		return NewRegistryError("force shutdown failed", err)
-	}
-
-	sc.logger.Info("Force shutdown completed", "canceled_requests", totalCanceled)
-	return nil
-}
-
-// GetShutdownStatus returns the current shutdown status of the system.
-func (sc *ShutdownCoordinator) GetShutdownStatus() ShutdownStatus {
-	activeRequests := sc.registry.GetActiveRequestsCount()
-	totalActive := int64(0)
-	for _, count := range activeRequests {
-		totalActive += count
-	}
-
-	status := ShutdownStatus{
-		IsRunning:      sc.registry.running,
-		IsDraining:     sc.registry.IsDraining(),
-		ActiveRequests: totalActive,
-		ActiveByClient: activeRequests,
-		TotalClients:   len(sc.registry.clients),
-	}
-
-	// Determine phase
-	if !status.IsRunning {
-		status.Phase = ShutdownPhaseComplete
-	} else if status.IsDraining {
-		status.Phase = ShutdownPhaseDraining
-	} else {
-		status.Phase = ShutdownPhaseRunning
-	}
-
-	return status
-}
-
-// ShutdownStatus represents the current shutdown status.
-type ShutdownStatus struct {
-	Phase          ShutdownPhase    `json:"phase"`
-	IsRunning      bool             `json:"is_running"`
-	IsDraining     bool             `json:"is_draining"`
-	ActiveRequests int64            `json:"active_requests"`
-	ActiveByClient map[string]int64 `json:"active_by_client"`
-	TotalClients   int              `json:"total_clients"`
-}
-
-// ShutdownPhase represents the current phase of shutdown.
-type ShutdownPhase string
-
-const (
-	ShutdownPhaseRunning  ShutdownPhase = "running"
-	ShutdownPhaseDraining ShutdownPhase = "draining"
-	ShutdownPhaseComplete ShutdownPhase = "complete"
-)
-
 // initializeDiscovery sets up the discovery engine.
 func (pr *PluginRegistry) initializeDiscovery() error {
 	if len(pr.config.DiscoveryPaths) == 0 {
@@ -703,26 +546,7 @@ func (pr *PluginRegistry) initializeDiscovery() error {
 		return nil
 	}
 
-	// Create discovery config
-	discoveryConfig := ExtendedDiscoveryConfig{
-		DiscoveryConfig: DiscoveryConfig{
-			Enabled:     true,
-			Directories: pr.config.DiscoveryPaths,
-			Patterns:    []string{"*.so", "plugin-*", "*-plugin"},
-			WatchMode:   true,
-		},
-		SearchPaths:          pr.config.DiscoveryPaths,
-		FilePatterns:         []string{"*.so", "plugin-*", "*-plugin", "*.exe"},
-		MaxDepth:             3,
-		FollowSymlinks:       false,
-		AllowedTransports:    []TransportType{TransportExecutable},
-		ValidateManifests:    true,
-		RequiredCapabilities: []string{},
-		ExcludePaths:         []string{},
-		DiscoveryTimeout:     pr.config.DiscoveryInterval,
-	}
-
-	// Create discovery engine
+	discoveryConfig := pr.createDiscoveryConfig()
 	engine := NewDiscoveryEngine(discoveryConfig, pr.logger)
 
 	pr.discoveryEngine = engine
@@ -731,6 +555,30 @@ func (pr *PluginRegistry) initializeDiscovery() error {
 		"interval", pr.config.DiscoveryInterval)
 
 	return nil
+}
+
+// createDiscoveryConfig creates discovery configuration with sensible defaults.
+func (pr *PluginRegistry) createDiscoveryConfig() ExtendedDiscoveryConfig {
+	defaultPatterns := []string{"*.so", "plugin-*", "*-plugin"}
+	defaultFilePatterns := append(defaultPatterns, "*.exe")
+
+	return ExtendedDiscoveryConfig{
+		DiscoveryConfig: DiscoveryConfig{
+			Enabled:     true,
+			Directories: pr.config.DiscoveryPaths,
+			Patterns:    defaultPatterns,
+			WatchMode:   true,
+		},
+		SearchPaths:          pr.config.DiscoveryPaths,
+		FilePatterns:         defaultFilePatterns,
+		MaxDepth:             3,
+		FollowSymlinks:       false,
+		AllowedTransports:    []TransportType{TransportExecutable},
+		ValidateManifests:    true,
+		RequiredCapabilities: []string{},
+		ExcludePaths:         []string{},
+		DiscoveryTimeout:     pr.config.DiscoveryInterval,
+	}
 }
 
 // initializeFactories sets up the factory registration.
@@ -774,199 +622,6 @@ func (pr *PluginRegistry) createClientInstance(config PluginConfig) (*PluginClie
 	return client, nil
 }
 
-// PluginClient methods
-
-// Start starts the plugin client.
-func (pc *PluginClient) Start() error {
-	pc.mutex.Lock()
-	defer pc.mutex.Unlock()
-
-	if pc.status != StatusOffline {
-		return NewClientError("", "client is already running", nil)
-	}
-
-	pc.logger.Info("Starting plugin client", "name", pc.Name, "type", pc.Type)
-
-	// Create subprocess for executable plugins
-	if pc.config.Transport == TransportExecutable {
-		if err := pc.startSubprocess(); err != nil {
-			return NewProcessError("failed to start subprocess", err)
-		}
-	}
-
-	pc.status = StatusHealthy
-	pc.startTime = time.Now()
-	pc.lastPing = time.Now()
-
-	pc.logger.Info("Plugin client started", "name", pc.Name)
-	return nil
-}
-
-// Stop stops the plugin client.
-func (pc *PluginClient) Stop() error {
-	pc.mutex.Lock()
-	defer pc.mutex.Unlock()
-
-	if pc.status == StatusOffline {
-		return nil
-	}
-
-	pc.logger.Info("Stopping plugin client", "name", pc.Name)
-
-	// Cancel context
-	pc.cancel()
-
-	// Stop health checker
-	if pc.healthChecker != nil {
-		pc.healthChecker.Stop()
-	}
-
-	// Stop communication bridge
-	if pc.bridge != nil {
-		if err := pc.bridge.Stop(); err != nil {
-			pc.logger.Warn("Error stopping communication bridge",
-				"name", pc.Name,
-				"error", err)
-		}
-	}
-
-	// Stop subprocess
-	if pc.subprocess != nil {
-		if err := pc.subprocess.Close(); err != nil {
-			pc.logger.Warn("Error stopping subprocess",
-				"name", pc.Name,
-				"error", err)
-		}
-	}
-
-	pc.status = StatusOffline
-	pc.logger.Info("Plugin client stopped", "name", pc.Name)
-	return nil
-}
-
-// Health returns the current health status (required by HealthChecker).
-func (pc *PluginClient) Health(ctx context.Context) HealthStatus {
-	pc.mutex.RLock()
-	defer pc.mutex.RUnlock()
-
-	return HealthStatus{
-		Status:       pc.status,
-		Message:      fmt.Sprintf("Plugin client %s is %s", pc.Name, pc.status),
-		LastCheck:    time.Now(),
-		ResponseTime: 0, // Could implement actual ping time
-		Metadata: map[string]string{
-			"plugin_name": pc.Name,
-			"plugin_type": pc.Type,
-			"uptime":      time.Since(pc.startTime).String(),
-		},
-	}
-}
-
-// Close closes the plugin client (required by HealthChecker).
-func (pc *PluginClient) Close() error {
-	return pc.Stop()
-}
-
-// Call makes a method call to the plugin via gRPC or subprocess with request tracking.
-func (pc *PluginClient) Call(ctx context.Context, method string, args interface{}, tracker *RequestTracker) (interface{}, error) {
-	pc.mutex.RLock()
-	subprocess := pc.subprocess
-	pc.mutex.RUnlock()
-
-	if subprocess == nil {
-		return nil, NewClientError("", "plugin client not initialized", nil)
-	}
-
-	if pc.status != StatusHealthy {
-		return nil, NewClientError("", fmt.Sprintf("plugin client is not healthy: %s", pc.status), nil)
-	}
-
-	// Track request if tracker provided
-	if tracker != nil {
-		tracker.StartRequest(pc.Name, ctx)
-		defer tracker.EndRequest(pc.Name, ctx)
-	}
-
-	// Create execution context for the call
-	execCtx := ExecutionContext{
-		RequestID: fmt.Sprintf("registry_%d", time.Now().UnixNano()),
-		Timeout:   30 * time.Second,
-		Metadata:  map[string]string{"method": method},
-	}
-
-	// Make call using subprocess plugin
-	result, err := subprocess.Execute(ctx, execCtx, args)
-	if err != nil {
-		pc.logger.Error("Plugin call failed",
-			"name", pc.Name,
-			"method", method,
-			"error", err)
-		return nil, err
-	}
-
-	// Update last ping time
-	pc.mutex.Lock()
-	pc.lastPing = time.Now()
-	pc.mutex.Unlock()
-
-	return result, nil
-} // startSubprocess starts the subprocess for executable plugins.
-func (pc *PluginClient) startSubprocess() error {
-	if pc.executable == "" {
-		return NewConfigValidationError("executable path not specified", nil)
-	}
-
-	// Create subprocess plugin config
-	subprocessConfig := PluginConfig{
-		Name:       pc.Name,
-		Type:       pc.Type,
-		Transport:  TransportExecutable,
-		Executable: pc.executable,
-		Args:       pc.args,
-	}
-
-	// Create subprocess plugin factory
-	factory := &SubprocessPluginFactory[any, any]{}
-
-	// Create subprocess plugin
-	subprocess, err := factory.CreatePlugin(subprocessConfig)
-	if err != nil {
-		return NewProcessError("failed to create subprocess plugin", err)
-	}
-
-	// Type assert to subprocess plugin
-	subprocessPlugin, ok := subprocess.(*SubprocessPlugin[any, any])
-	if !ok {
-		return NewFactoryError("subprocess", fmt.Sprintf("expected SubprocessPlugin, got %T", subprocess), nil)
-	}
-	pc.subprocess = subprocessPlugin
-
-	// Create communication bridge
-	bridgeConfig := BridgeConfig{
-		ListenAddress:  "127.0.0.1",
-		ListenPort:     0, // Auto-assign
-		MaxChannels:    10,
-		ChannelTimeout: 30 * time.Second,
-		AcceptTimeout:  10 * time.Second,
-	}
-
-	bridge := NewCommunicationBridge(bridgeConfig, pc.logger)
-	if err := bridge.Start(); err != nil {
-		return NewCommunicationError("failed to start communication bridge", err)
-	}
-
-	pc.bridge = bridge
-
-	// Note: RPC protocol removed - using gRPC/subprocess communication only
-
-	pc.logger.Info("Subprocess started",
-		"name", pc.Name,
-		"executable", pc.executable,
-		"bridge_port", bridge.GetPort())
-
-	return nil
-}
-
 // Observability methods for PluginRegistry
 
 // ConfigureObservability configures comprehensive observability for the plugin registry
@@ -992,44 +647,34 @@ func (pr *PluginRegistry) ConfigureObservability(config ObservabilityConfig) err
 	return nil
 }
 
-// recordFactoryMetrics records plugin factory operations
-func (pr *PluginRegistry) recordFactoryMetrics(operation, pluginType string) {
+// recordMetrics is a helper method to record metrics with labels
+func (pr *PluginRegistry) recordMetrics(metricName string, labels map[string]string) {
 	if !pr.observabilityConfig.IsMetricsEnabled() || pr.metricsCollector == nil {
 		return
 	}
 
-	labels := map[string]string{
-		"operation":   operation,
-		"plugin_type": pluginType,
-	}
-
 	pr.metricsCollector.IncrementCounter(
-		pr.observabilityConfig.MetricsPrefix+"_plugin_factory_operations_total",
+		pr.observabilityConfig.MetricsPrefix+"_"+metricName,
 		labels,
 		1,
 	)
 }
 
+// recordFactoryMetrics records plugin factory operations
+func (pr *PluginRegistry) recordFactoryMetrics(operation, pluginType string) {
+	pr.recordMetrics("plugin_factory_operations_total", map[string]string{
+		"operation":   operation,
+		"plugin_type": pluginType,
+	})
+}
+
 // recordClientMetrics records client lifecycle operations
 func (pr *PluginRegistry) recordClientMetrics(operation, clientName, clientType string) {
-	if !pr.observabilityConfig.IsMetricsEnabled() || pr.metricsCollector == nil {
-		return
-	}
-
-	labels := map[string]string{
+	pr.recordMetrics("plugin_client_operations_total", map[string]string{
 		"operation":   operation,
 		"client_name": clientName,
 		"client_type": clientType,
-	}
-
-	pr.metricsCollector.IncrementCounter(
-		pr.observabilityConfig.MetricsPrefix+"_plugin_client_operations_total",
-		labels,
-		1,
-	)
-
-	// Note: updateClientCountGaugeWithCount is called with explicit count
-	// to avoid re-entrant locking issues
+	})
 }
 
 // updateClientCountGaugeWithCount updates the gauge with the provided count (no additional locking)
@@ -1090,12 +735,6 @@ func (pr *PluginRegistry) GetObservabilityMetrics() map[string]interface{} {
 
 // EnableObservability is a convenience method to enable observability with default settings
 func (pr *PluginRegistry) EnableObservability() error {
-	config := DefaultObservabilityConfig()
-	return pr.ConfigureObservability(config)
-}
-
-// EnableEnhancedObservability enables observability with advanced metrics collector
-func (pr *PluginRegistry) EnableEnhancedObservability() error {
 	config := DefaultObservabilityConfig()
 	return pr.ConfigureObservability(config)
 }

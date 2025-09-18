@@ -47,20 +47,20 @@ var DefaultHandshakeConfig = HandshakeConfig{
 // Validate checks if the HandshakeConfig is valid and complete.
 func (hc *HandshakeConfig) Validate() error {
 	if hc.ProtocolVersion == 0 {
-		return fmt.Errorf("protocol version must be greater than 0")
+		return NewHandshakeError("protocol version must be greater than 0", nil)
 	}
 
 	if hc.MagicCookieKey == "" {
-		return fmt.Errorf("magic cookie key is required")
+		return NewHandshakeError("magic cookie key is required", nil)
 	}
 
 	if hc.MagicCookieValue == "" {
-		return fmt.Errorf("magic cookie value is required")
+		return NewHandshakeError("magic cookie value is required", nil)
 	}
 
 	// Validate magic cookie key format (should be valid environment variable name)
 	if !isValidEnvVarName(hc.MagicCookieKey) {
-		return fmt.Errorf("magic cookie key must be a valid environment variable name")
+		return NewHandshakeError("magic cookie key must be a valid environment variable name", nil)
 	}
 
 	return nil
@@ -75,7 +75,11 @@ func isValidEnvVarName(name string) bool {
 
 	// Environment variable names must start with letter or underscore
 	// and contain only letters, digits, and underscores
-	matched, _ := regexp.MatchString(`^[a-zA-Z_][a-zA-Z0-9_]*$`, name)
+	matched, err := regexp.MatchString(`^[a-zA-Z_][a-zA-Z0-9_]*$`, name)
+	if err != nil {
+		// This should not happen with our static regex pattern, but handle gracefully
+		return false
+	}
 	return matched
 }
 
@@ -206,8 +210,8 @@ func (hm *HandshakeManager) ValidatePluginEnvironment() (*HandshakeInfo, error) 
 func (hm *HandshakeManager) validateMagicCookie() error {
 	cookieValue := os.Getenv(hm.config.MagicCookieKey)
 	if cookieValue != hm.config.MagicCookieValue {
-		return fmt.Errorf("invalid magic cookie: expected %s, got %s",
-			hm.config.MagicCookieValue, cookieValue)
+		return NewHandshakeError(fmt.Sprintf("invalid magic cookie: expected %s, got %s",
+			hm.config.MagicCookieValue, cookieValue), nil)
 	}
 	return nil
 }
@@ -216,17 +220,17 @@ func (hm *HandshakeManager) validateMagicCookie() error {
 func (hm *HandshakeManager) validateProtocolVersion() (uint, error) {
 	versionStr := os.Getenv("PLUGIN_PROTOCOL_VERSION")
 	if versionStr == "" {
-		return 0, fmt.Errorf("missing PLUGIN_PROTOCOL_VERSION environment variable")
+		return 0, NewHandshakeError("missing PLUGIN_PROTOCOL_VERSION environment variable", nil)
 	}
 
 	version, err := strconv.ParseUint(versionStr, 10, 32)
 	if err != nil {
-		return 0, fmt.Errorf("invalid protocol version: %w", err)
+		return 0, NewHandshakeError("invalid protocol version", err)
 	}
 
 	if uint(version) != hm.config.ProtocolVersion {
-		return 0, fmt.Errorf("protocol version mismatch: expected %d, got %d",
-			hm.config.ProtocolVersion, version)
+		return 0, NewHandshakeError(fmt.Sprintf("protocol version mismatch: expected %d, got %d",
+			hm.config.ProtocolVersion, version), nil)
 	}
 
 	return uint(version), nil
@@ -236,17 +240,17 @@ func (hm *HandshakeManager) validateProtocolVersion() (uint, error) {
 func (hm *HandshakeManager) validateServerInfo() (string, int, error) {
 	address := os.Getenv("PLUGIN_SERVER_ADDRESS")
 	if address == "" {
-		return "", 0, fmt.Errorf("missing PLUGIN_SERVER_ADDRESS environment variable")
+		return "", 0, NewHandshakeError("missing PLUGIN_SERVER_ADDRESS environment variable", nil)
 	}
 
 	portStr := os.Getenv("PLUGIN_SERVER_PORT")
 	if portStr == "" {
-		return "", 0, fmt.Errorf("missing PLUGIN_SERVER_PORT environment variable")
+		return "", 0, NewHandshakeError("missing PLUGIN_SERVER_PORT environment variable", nil)
 	}
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return "", 0, fmt.Errorf("invalid server port: %w", err)
+		return "", 0, NewHandshakeError("invalid server port", err)
 	}
 
 	return address, port, nil
@@ -259,7 +263,7 @@ func (hm *HandshakeManager) validatePluginType() (PluginType, error) {
 	case "grpc":
 		return PluginTypeGRPC, nil
 	default:
-		return PluginType(0), fmt.Errorf("invalid or missing plugin type: %s", pluginTypeStr)
+		return PluginType(0), NewHandshakeError(fmt.Sprintf("invalid or missing plugin type: %s", pluginTypeStr), nil)
 	}
 }
 
@@ -276,7 +280,7 @@ func (hm *HandshakeManager) logValidationSuccess(info *HandshakeInfo) {
 func GenerateSecureID() (string, error) {
 	bytes := make([]byte, 16)
 	if _, err := rand.Read(bytes); err != nil {
-		return "", fmt.Errorf("failed to generate secure ID: %w", err)
+		return "", NewHandshakeError("failed to generate secure ID", err)
 	}
 	return hex.EncodeToString(bytes), nil
 }

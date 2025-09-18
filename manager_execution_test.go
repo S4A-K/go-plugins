@@ -144,7 +144,9 @@ func TestManagerExecution_BasicExecution(t *testing.T) {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		manager.Shutdown(ctx)
+		if err := manager.Shutdown(ctx); err != nil {
+			t.Logf("Warning: failed to shutdown manager: %v", err)
+		}
 	}()
 
 	plugin := NewMockExecutionPlugin("test-plugin", "1.0.0")
@@ -184,7 +186,9 @@ func TestManagerExecution_ExecuteWithOptions(t *testing.T) {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		manager.Shutdown(ctx)
+		if err := manager.Shutdown(ctx); err != nil {
+			t.Logf("Warning: failed to shutdown manager: %v", err)
+		}
 	}()
 
 	plugin := NewMockExecutionPlugin("test-plugin", "1.0.0")
@@ -223,7 +227,9 @@ func TestManagerExecution_RetryLogic(t *testing.T) {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		manager.Shutdown(ctx)
+		if err := manager.Shutdown(ctx); err != nil {
+			t.Logf("Warning: failed to shutdown manager: %v", err)
+		}
 	}()
 
 	plugin := NewMockExecutionPlugin("test-plugin", "1.0.0")
@@ -267,7 +273,9 @@ func TestManagerExecution_PermanentFailure(t *testing.T) {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		manager.Shutdown(ctx)
+		if err := manager.Shutdown(ctx); err != nil {
+			t.Logf("Warning: failed to shutdown manager: %v", err)
+		}
 	}()
 
 	plugin := NewMockExecutionPlugin("test-plugin", "1.0.0")
@@ -300,7 +308,9 @@ func TestManagerExecution_Timeout(t *testing.T) {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		manager.Shutdown(ctx)
+		if err := manager.Shutdown(ctx); err != nil {
+			t.Logf("Warning: failed to shutdown manager: %v", err)
+		}
 	}()
 
 	plugin := NewMockExecutionPlugin("test-plugin", "1.0.0")
@@ -335,7 +345,9 @@ func TestManagerExecution_PluginNotFound(t *testing.T) {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		manager.Shutdown(ctx)
+		if err := manager.Shutdown(ctx); err != nil {
+			t.Logf("Warning: failed to shutdown manager: %v", err)
+		}
 	}()
 
 	// Test plugin not found
@@ -368,7 +380,9 @@ func TestManagerExecution_ShutdownState(t *testing.T) {
 	// Shutdown manager
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	manager.Shutdown(ctx)
+	if err := manager.Shutdown(ctx); err != nil {
+		t.Fatalf("Failed to shutdown manager: %v", err)
+	}
 
 	// Test execution after shutdown
 	response, err := manager.Execute(context.Background(), "test-plugin", map[string]string{"test": "data"})

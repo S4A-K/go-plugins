@@ -345,6 +345,25 @@ func (m *Manager[Req, Resp]) GetObservabilityMetrics() map[string]interface{} {
 	metrics := make(map[string]interface{})
 
 	// Get basic manager metrics
+	m.addManagerMetrics(metrics)
+
+	// Add runtime observability metrics
+	m.addGlobalMetrics(metrics)
+
+	// Add plugin-specific detailed metrics
+	m.addPluginMetrics(metrics)
+
+	// Get metrics from external collectors
+	m.addExternalCollectorMetrics(metrics)
+
+	// Add system status information
+	m.addSystemStatusMetrics(metrics)
+
+	return metrics
+}
+
+// addManagerMetrics adds basic manager metrics
+func (m *Manager[Req, Resp]) addManagerMetrics(metrics map[string]interface{}) {
 	managerMetrics := m.GetMetrics()
 	metrics["manager"] = map[string]interface{}{
 		"requests_total":        managerMetrics.RequestsTotal.Load(),
@@ -354,8 +373,10 @@ func (m *Manager[Req, Resp]) GetObservabilityMetrics() map[string]interface{} {
 		"circuit_breaker_trips": managerMetrics.CircuitBreakerTrips.Load(),
 		"health_check_failures": managerMetrics.HealthCheckFailures.Load(),
 	}
+}
 
-	// Add runtime observability metrics (integrated from ObservableManager)
+// addGlobalMetrics adds runtime observability metrics
+func (m *Manager[Req, Resp]) addGlobalMetrics(metrics map[string]interface{}) {
 	metrics["global"] = map[string]interface{}{
 		"total_requests":  m.totalRequests.Load(),
 		"total_errors":    m.totalErrors.Load(),
@@ -363,45 +384,80 @@ func (m *Manager[Req, Resp]) GetObservabilityMetrics() map[string]interface{} {
 		"start_time":      m.startTime,
 		"uptime_seconds":  time.Since(m.startTime).Seconds(),
 	}
+}
 
-	// Add plugin-specific detailed metrics
+// addPluginMetrics adds plugin-specific detailed metrics
+func (m *Manager[Req, Resp]) addPluginMetrics(metrics map[string]interface{}) {
 	m.metricsMu.RLock()
+	defer m.metricsMu.RUnlock()
+
 	pluginMetrics := make(map[string]interface{})
-	for pluginName, metrics := range m.pluginMetrics {
-		totalRequests := metrics.TotalRequests.Load()
-		successfulRequests := metrics.SuccessfulRequests.Load()
-		failedRequests := metrics.FailedRequests.Load()
+	for pluginName, pluginMetric := range m.pluginMetrics {
+		pluginMetrics[pluginName] = m.buildPluginMetricData(pluginMetric)
+	}
+	metrics["plugins"] = pluginMetrics
+}
 
-		var successRate float64
-		if totalRequests > 0 {
-			successRate = float64(successfulRequests) / float64(totalRequests) * 100.0
-		}
+// buildPluginMetricData builds metric data for a single plugin
+func (m *Manager[Req, Resp]) buildPluginMetricData(pluginMetric *PluginObservabilityMetrics) map[string]interface{} {
+	totalRequests := pluginMetric.TotalRequests.Load()
+	successfulRequests := pluginMetric.SuccessfulRequests.Load()
+	failedRequests := pluginMetric.FailedRequests.Load()
 
-		pluginMetrics[pluginName] = map[string]interface{}{
-			"total_requests":        totalRequests,
-			"successful_requests":   successfulRequests,
-			"failed_requests":       failedRequests,
-			"active_requests":       metrics.ActiveRequests.Load(),
-			"success_rate":          successRate,
-			"total_latency_ns":      metrics.TotalLatency.Load(),
-			"min_latency_ns":        metrics.MinLatency.Load(),
-			"max_latency_ns":        metrics.MaxLatency.Load(),
-			"avg_latency_ns":        metrics.AvgLatency.Load(),
-			"timeout_errors":        metrics.TimeoutErrors.Load(),
-			"connection_errors":     metrics.ConnectionErrors.Load(),
-			"auth_errors":           metrics.AuthErrors.Load(),
-			"other_errors":          metrics.OtherErrors.Load(),
-			"circuit_breaker_trips": metrics.CircuitBreakerTrips.Load(),
-			"circuit_breaker_state": metrics.CircuitBreakerState.Load().(string),
-			"health_check_total":    metrics.HealthCheckTotal.Load(),
-			"health_check_failed":   metrics.HealthCheckFailed.Load(),
-			"last_health_check":     metrics.LastHealthCheck.Load(),
-			"health_status":         metrics.HealthStatus.Load().(string),
+	var successRate float64
+	if totalRequests > 0 {
+		successRate = float64(successfulRequests) / float64(totalRequests) * 100.0
+	}
+
+	return map[string]interface{}{
+		"total_requests":        totalRequests,
+		"successful_requests":   successfulRequests,
+		"failed_requests":       failedRequests,
+		"active_requests":       pluginMetric.ActiveRequests.Load(),
+		"success_rate":          successRate,
+		"total_latency_ns":      pluginMetric.TotalLatency.Load(),
+		"min_latency_ns":        pluginMetric.MinLatency.Load(),
+		"max_latency_ns":        pluginMetric.MaxLatency.Load(),
+		"avg_latency_ns":        pluginMetric.AvgLatency.Load(),
+		"timeout_errors":        pluginMetric.TimeoutErrors.Load(),
+		"connection_errors":     pluginMetric.ConnectionErrors.Load(),
+		"auth_errors":           pluginMetric.AuthErrors.Load(),
+		"other_errors":          pluginMetric.OtherErrors.Load(),
+		"circuit_breaker_trips": pluginMetric.CircuitBreakerTrips.Load(),
+		"circuit_breaker_state": m.getCircuitBreakerState(pluginMetric.CircuitBreakerState),
+		"health_check_total":    pluginMetric.HealthCheckTotal.Load(),
+		"health_check_failed":   pluginMetric.HealthCheckFailed.Load(),
+		"last_health_check":     pluginMetric.LastHealthCheck.Load(),
+		"health_status":         m.getHealthStatus(pluginMetric.HealthStatus),
+	}
+}
+
+// getCircuitBreakerState safely extracts circuit breaker state
+func (m *Manager[Req, Resp]) getCircuitBreakerState(state *atomic.Value) string {
+	if state != nil {
+		if val := state.Load(); val != nil {
+			if str, ok := val.(string); ok {
+				return str
+			}
 		}
 	}
-	m.metricsMu.RUnlock()
-	metrics["plugins"] = pluginMetrics
+	return "unknown"
+}
 
+// getHealthStatus safely extracts health status
+func (m *Manager[Req, Resp]) getHealthStatus(status *atomic.Value) string {
+	if status != nil {
+		if val := status.Load(); val != nil {
+			if str, ok := val.(string); ok {
+				return str
+			}
+		}
+	}
+	return "unknown"
+}
+
+// addExternalCollectorMetrics adds metrics from external collectors
+func (m *Manager[Req, Resp]) addExternalCollectorMetrics(metrics map[string]interface{}) {
 	// Get metrics from collector if available
 	if m.metricsCollector != nil {
 		metrics["collector"] = m.metricsCollector.GetMetrics()
@@ -413,9 +469,14 @@ func (m *Manager[Req, Resp]) GetObservabilityMetrics() map[string]interface{} {
 			metrics["prometheus"] = prometheusMetrics
 		}
 	}
+}
+
+// addSystemStatusMetrics adds health and circuit breaker status information
+func (m *Manager[Req, Resp]) addSystemStatusMetrics(metrics map[string]interface{}) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	// Get health status for all plugins
-	m.mu.RLock()
 	healthStatuses := make(map[string]HealthStatus)
 	for name, status := range m.healthStatus {
 		healthStatuses[name] = status
@@ -426,12 +487,9 @@ func (m *Manager[Req, Resp]) GetObservabilityMetrics() map[string]interface{} {
 	for name, breaker := range m.breakers {
 		circuitBreakerStates[name] = breaker.GetState().String()
 	}
-	m.mu.RUnlock()
 
 	metrics["health_status"] = healthStatuses
 	metrics["circuit_breaker_states"] = circuitBreakerStates
-
-	return metrics
 }
 
 // EnableObservability is a convenience method to enable observability with default settings
