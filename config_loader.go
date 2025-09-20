@@ -2,7 +2,7 @@
 //
 // This module replaces the custom hot-reload implementation with Argus,
 // providing superior performance (12.10ns/op), battle-tested reliability,
-// and comprehensive format support (JSON, YAML, TOML, HCL, INI).
+// and comprehensive format support (JSON, YAML, HCL, INI).
 //
 // Key improvements over custom hot-reload:
 // - 500+ lines of custom code eliminated
@@ -412,7 +412,7 @@ func (cw *ConfigWatcher[Req, Resp]) loadConfigFromFile(path string) (ManagerConf
 
 	// Parse configuration using hybrid approach:
 	// - Argus for format detection and simple formats
-	// - Specialized parsers for complex structured formats (YAML, TOML)
+	// - Specialized parsers for complex structured formats (YAML)
 	format := argus.DetectFormat(securePath)
 
 	// Use specialized parsers for complex structured formats
@@ -436,7 +436,8 @@ func (cw *ConfigWatcher[Req, Resp]) loadConfigFromFile(path string) (ManagerConf
 // This function provides a public API for loading configuration files in multiple formats:
 //   - JSON (application/json)
 //   - YAML (application/yaml, .yml/.yaml)
-//   - TOML (application/toml)
+//
+// TOML support removed
 //   - HCL (Configuration Language)
 //   - INI (text/plain, .ini/.conf)
 //   - Properties (text/plain, .properties)
@@ -1293,7 +1294,7 @@ func writeConfigFileUnix(filename string, data []byte) error {
 
 // bindManagerConfig converts configuration map to ManagerConfig struct.
 // This handles the bridge between Argus multi-format parsing and ManagerConfig.
-// Supports all configuration formats through Argus: JSON, YAML, TOML, HCL, INI, Properties.
+// Supports all configuration formats through Argus: JSON, YAML, HCL, INI, Properties.
 func bindManagerConfig(configMap map[string]interface{}, config *ManagerConfig) error {
 	// Since ManagerConfig is a complex nested structure with plugins array,
 	// we convert the parsed map back to JSON and use traditional unmarshaling.
@@ -1323,7 +1324,7 @@ func bindManagerConfig(configMap map[string]interface{}, config *ManagerConfig) 
 // Strategy:
 //   - JSON: Use Argus (fast, simple)
 //   - YAML: Use gopkg.in/yaml.v3 (full YAML spec support)
-//   - Others: Use Argus (TOML, HCL, INI, Properties)
+//   - Others: Use Argus (HCL, INI, Properties)
 func parseConfigWithHybridStrategy(configBytes []byte, format argus.ConfigFormat, config *ManagerConfig) error {
 	switch format {
 	case argus.FormatJSON:
@@ -1338,13 +1339,7 @@ func parseConfigWithHybridStrategy(configBytes []byte, format argus.ConfigFormat
 		// Use specialized YAML parser for full spec support
 		return parseYAMLConfig(configBytes, config)
 
-	case argus.FormatTOML:
-		// Use Argus for TOML parsing (simplified and efficient approach)
-		configMap, err := argus.ParseConfig(configBytes, format)
-		if err != nil {
-			return err
-		}
-		return bindManagerConfig(configMap, config)
+	// TOML support removed - use JSON or YAML instead
 
 	default:
 		// Use Argus for other formats (HCL, INI, Properties)

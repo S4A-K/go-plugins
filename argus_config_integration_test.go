@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -353,6 +354,10 @@ func TestLibraryConfigIntegration_CompleteWorkflow(t *testing.T) {
 func TestLibraryConfigIntegration_PerformanceUnderLoad(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping performance test in short mode")
+	}
+
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping performance test on Windows due to file watcher timing limitations")
 	}
 
 	// Setup performance test environment

@@ -331,8 +331,8 @@ func (cb *CommunicationBridge) handleChannelCommunication(channel *Communication
 		}
 	}
 
-	// Protocol handling will be implemented in RPC layer (Priority 5)
-	// This provides the transport foundation for JSON-RPC/gRPC communication
+	// Protocol handling uses direct subprocess communication
+	// This provides the transport foundation for subprocess communication
 	buffer := make([]byte, cb.config.HandshakeBuffer)
 	for {
 		select {

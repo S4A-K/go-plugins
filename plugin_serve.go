@@ -500,7 +500,7 @@ func (gps *GenericPluginServer) handleConnection(ctx context.Context, connID str
 		}
 	}
 
-	// Request/response protocol will be implemented in RPC layer (Priority 5)
+	// Request/response protocol uses direct subprocess communication
 	// This provides the connection foundation for JSON-RPC communication
 	buffer := make([]byte, 1024)
 	for {

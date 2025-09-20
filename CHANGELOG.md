@@ -9,12 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Multi-Format Configuration Support**: Comprehensive configuration format support with automatic detection
-  - **Native Format Support**: JSON, YAML (.yaml/.yml), TOML (.toml) with identical functionality
+  - **Native Format Support**: JSON, YAML (.yaml/.yml) with identical functionality
   - **Hybrid Parsing Strategy**: Argus for format detection and file watching, specialized parsers for complex structures
-  - **Specialized Parsers**: gopkg.in/yaml.v3 for YAML, github.com/BurntSushi/toml for TOML parsing
-  - **Complete TOML Tag Implementation**: All configuration structures support TOML format with full nested configurations
+  - **Specialized Parsers**: gopkg.in/yaml.v3 for YAML parsing
   - **Hot Reload Compatibility**: All formats support hot reloading through Argus file watching
-  - **Seamless Migration**: Convert between JSON, YAML, TOML formats without code changes
+  - **Seamless Migration**: Convert between JSON and YAML formats without code changes
   - **Performance Optimized**: Format-specific parsers for optimal performance characteristics
 - **Active Request Monitoring System**: Production-grade request tracking for zero-downtime operations
   - Real-time active request counting using atomic operations
@@ -44,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Enhanced error handling and validation across all configuration formats
 - **Dependencies**: Added support for specialized parsers
   - Added `gopkg.in/yaml.v3 v3.0.1` for advanced YAML parsing capabilities
-  - Added `github.com/BurntSushi/toml v1.5.0` for comprehensive TOML support
+  - Removed TOML support - use JSON or YAML instead
   - Maintained backward compatibility with existing Argus-based JSON parsing
 - **Graceful Draining Implementation**: Replaced `time.Sleep()` with active request monitoring
   - Config loader now uses intelligent request tracking instead of fixed delays

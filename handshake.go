@@ -11,6 +11,7 @@
 package goplugins
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -318,6 +319,11 @@ func IsHandshakeTimeoutError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), "handshake timeout") ||
-		strings.Contains(err.Error(), "deadline exceeded")
+
+	// Check for handshake timeout messages
+	errorMsg := err.Error()
+	return strings.Contains(errorMsg, "handshake timeout") ||
+		strings.Contains(errorMsg, "deadline exceeded") ||
+		strings.Contains(errorMsg, "context deadline exceeded") ||
+		err == context.DeadlineExceeded
 }

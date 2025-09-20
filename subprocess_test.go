@@ -303,7 +303,10 @@ func TestSubprocessPlugin_GetInfo(t *testing.T) {
 		t.Fatalf("Failed to create plugin: %v", err)
 	}
 
-	subprocessPlugin := plugin.(*SubprocessPlugin[TestRequest, TestResponse])
+	subprocessPlugin, ok := plugin.(*SubprocessPlugin[TestRequest, TestResponse])
+	if !ok {
+		t.Fatalf("Expected SubprocessPlugin, got %T", plugin)
+	}
 	processInfo := subprocessPlugin.GetInfo()
 
 	if processInfo == nil {
@@ -713,7 +716,10 @@ func TestSubprocessPlugin_ProcessLifecycle_Integration(t *testing.T) {
 		t.Fatalf("Failed to create plugin: %v", err)
 	}
 
-	subprocessPlugin := plugin.(*SubprocessPlugin[TestRequest, TestResponse])
+	subprocessPlugin, ok := plugin.(*SubprocessPlugin[TestRequest, TestResponse])
+	if !ok {
+		t.Fatalf("Expected SubprocessPlugin, got %T", plugin)
+	}
 
 	// Test initial state
 	processInfo := subprocessPlugin.GetInfo()

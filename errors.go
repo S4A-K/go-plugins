@@ -74,12 +74,14 @@ const (
 	ErrCodeAuditError              = "SECURITY_1806"
 
 	// Registry and isolation errors (1900-1999)
-	ErrCodeRegistryError  = "REGISTRY_1901"
-	ErrCodeIsolationError = "REGISTRY_1902"
-	ErrCodeProcessError   = "REGISTRY_1903"
-	ErrCodeFactoryError   = "REGISTRY_1904"
-	ErrCodeClientError    = "REGISTRY_1905"
-	ErrCodeDiscoveryError = "REGISTRY_1906"
+	ErrCodeRegistryError   = "REGISTRY_1901"
+	ErrCodeIsolationError  = "REGISTRY_1902"
+	ErrCodeProcessError    = "REGISTRY_1903"
+	ErrCodeFactoryError    = "REGISTRY_1904"
+	ErrCodeClientError     = "REGISTRY_1905"
+	ErrCodeDiscoveryError  = "REGISTRY_1906"
+	ErrCodePluginCreation  = "REGISTRY_1907"
+	ErrCodeSubprocessError = "REGISTRY_1908"
 
 	// RPC and communication errors (2000-2099)
 	ErrCodeRPCError           = "RPC_2001"
@@ -492,5 +494,19 @@ func NewPluginProtocolError(message string, cause error) *errors.Error {
 func NewSerializationError(message string, cause error) *errors.Error {
 	return errors.Wrap(cause, ErrCodeSerializationError, "Serialization error: "+message).
 		WithUserMessage("Data serialization failed").
+		WithSeverity("error")
+}
+
+// Plugin creation error constructors
+
+func NewPluginCreationError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodePluginCreation, "Plugin creation failed: "+message).
+		WithUserMessage("Failed to create plugin").
+		WithSeverity("error")
+}
+
+func NewSubprocessError(message string, cause error) *errors.Error {
+	return errors.Wrap(cause, ErrCodeSubprocessError, "Subprocess operation failed: "+message).
+		WithUserMessage("Subprocess plugin operation failed").
 		WithSeverity("error")
 }

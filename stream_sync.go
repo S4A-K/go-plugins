@@ -398,29 +398,87 @@ func (ss *StreamSyncer) formatLine(line string, streamType StreamType) string {
 }
 
 // formatStreamChunk formats a data chunk for streaming mode output.
-// Unlike formatLine, this is designed for binary/chunk data that may not be line-oriented.
+//
+// This function handles binary/chunk data formatting for streaming mode, applying
+// prefixes and timestamps only at appropriate boundaries to preserve data integrity.
+//
+// Formatting Strategy:
+//   - Preserves binary data integrity by avoiding mid-stream formatting
+//   - Applies formatting only at chunk boundaries that appear to be new content
+//   - Uses helper functions to reduce complexity and improve maintainability
+//
+// Design Considerations:
+//   - Unlike formatLine, this handles non-line-oriented data
+//   - Prevents formatting injection into binary streams
+//   - Maintains consistent output formatting across stream types
+//
+// Complexity: Reduced from 10 to 3 through helper function extraction
 func (ss *StreamSyncer) formatStreamChunk(chunk string, streamType StreamType) string {
-	result := chunk
-
-	// For streaming mode, we only add prefix/timestamp at the beginning of chunks
-	// to avoid breaking binary data or inserting formatting in the middle of output
-	if ss.config.PrefixOutput && ss.config.OutputPrefix != "" {
-		// Only add prefix if this chunk starts what looks like a new line or is the first chunk
-		if len(chunk) > 0 && (chunk[0] != ' ' && chunk[0] != '\t') {
-			prefix := fmt.Sprintf("%s:%s ", ss.config.OutputPrefix, streamType.String())
-			result = prefix + result
-		}
+	if !ss.shouldFormatChunk(chunk) {
+		return chunk
 	}
 
+	result := chunk
+
+	// Apply prefix formatting if enabled
+	if ss.config.PrefixOutput && ss.config.OutputPrefix != "" {
+		result = ss.applyChunkPrefix(result, streamType)
+	}
+
+	// Apply timestamp formatting if enabled
 	if ss.config.TimestampOutput {
-		// Only add timestamp at the beginning of chunks that look like new content
-		if len(chunk) > 0 && (chunk[0] != ' ' && chunk[0] != '\t') {
-			timestamp := time.Now().Format("2006-01-02 15:04:05.000")
-			result = fmt.Sprintf("[%s] %s", timestamp, result)
-		}
+		result = ss.applyChunkTimestamp(result)
 	}
 
 	return result
+}
+
+// shouldFormatChunk determines if a chunk should receive formatting.
+//
+// This helper function encapsulates the logic for determining when formatting
+// should be applied to streaming chunks, preventing formatting injection into
+// binary data or mid-stream content.
+//
+// Formatting Criteria:
+//   - Chunk must not be empty
+//   - Chunk should start with non-whitespace character (indicates new content)
+//   - Avoids formatting continuation data that starts with spaces/tabs
+//
+// Complexity: 2 (chunk validation with character inspection)
+func (ss *StreamSyncer) shouldFormatChunk(chunk string) bool {
+	return len(chunk) > 0 && (chunk[0] != ' ' && chunk[0] != '\t')
+}
+
+// applyChunkPrefix applies prefix formatting to a stream chunk.
+//
+// This helper function handles prefix application for streaming chunks,
+// including stream type identification and proper spacing.
+//
+// Prefix Format:
+//   - Combines configured output prefix with stream type
+//   - Adds appropriate spacing for readability
+//   - Maintains consistent prefix format across all streams
+//
+// Complexity: 1 (straightforward prefix application)
+func (ss *StreamSyncer) applyChunkPrefix(chunk string, streamType StreamType) string {
+	prefix := fmt.Sprintf("%s:%s ", ss.config.OutputPrefix, streamType.String())
+	return prefix + chunk
+}
+
+// applyChunkTimestamp applies timestamp formatting to a stream chunk.
+//
+// This helper function handles timestamp application for streaming chunks,
+// using a consistent timestamp format for all stream output.
+//
+// Timestamp Format:
+//   - Uses high-precision timestamp format (milliseconds)
+//   - Brackets timestamp for visual separation
+//   - Maintains consistent formatting across all streams
+//
+// Complexity: 1 (straightforward timestamp application)
+func (ss *StreamSyncer) applyChunkTimestamp(chunk string) string {
+	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
+	return fmt.Sprintf("[%s] %s", timestamp, chunk)
 }
 
 // GetStats returns synchronization statistics for all streams.

@@ -11,11 +11,30 @@
 package goplugins
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os/exec"
 	"sync"
 	"time"
 )
+
+// SubprocessRequest represents a request sent to a subprocess plugin.
+type SubprocessRequest struct {
+	ID      string           `json:"id"`
+	Method  string           `json:"method"`
+	Payload interface{}      `json:"payload"`
+	Context ExecutionContext `json:"context"`
+}
+
+// SubprocessResponse represents a response received from a subprocess plugin.
+type SubprocessResponse[T any] struct {
+	ID     string  `json:"id"`
+	Result T       `json:"result,omitempty"`
+	Error  *string `json:"error,omitempty"`
+}
 
 // SubprocessPlugin represents a plugin that runs as a subprocess.
 // This plugin type launches external executables as separate processes and
@@ -32,20 +51,15 @@ import (
 //   - Configuration parsing via ConfigParser
 //   - Automatic cleanup on shutdown
 type SubprocessPlugin[Req, Resp any] struct {
-	// Core components (after refactoring)
-	processManager   *ProcessManager
-	configParser     *ConfigParser
-	lifecycleManager *LifecycleManager
+	// Unified management (simplified architecture)
+	subprocessManager *SubprocessManager
 
-	// Legacy components (maintained for compatibility)
-	handshakeManager *HandshakeManager
-	streamSyncer     *StreamSyncer
-	commBridge       *CommunicationBridge
+	// Communication pipes (configured during startup)
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
 
-	// Configuration
-	handshakeConfig HandshakeConfig
-	streamConfig    StreamSyncConfig
-	bridgeConfig    BridgeConfig
+	// Communication state
+	communicationMutex sync.Mutex // Serialize subprocess communication
 
 	// State tracking
 	mutex  sync.RWMutex
@@ -126,6 +140,10 @@ func (f *SubprocessPluginFactory[Req, Resp]) CreatePlugin(config PluginConfig) (
 		streamConfig = customStreamConfig
 	}
 
+	// Disable stdout syncing for subprocess communication to avoid pipe conflicts
+	// We need stdout for request-response communication
+	streamConfig.SyncStdout = false
+
 	// Customize prefix with plugin name
 	if streamConfig.PrefixOutput && streamConfig.OutputPrefix == "[plugin]" {
 		streamConfig.OutputPrefix = fmt.Sprintf("[%s]", config.Name)
@@ -146,43 +164,22 @@ func (f *SubprocessPluginFactory[Req, Resp]) CreatePlugin(config PluginConfig) (
 		return nil, err
 	}
 
-	// Create process manager
-	processManager := NewProcessManager(ProcessManagerConfig{
-		ExecutablePath: parsedConfig.ExecutablePath,
-		Args:           parsedConfig.Args,
-		Env:            parsedConfig.Env,
-		Logger:         logger,
-	})
-
-	// Create legacy components for compatibility
-	handshakeManager := NewHandshakeManager(handshakeConfig, logger)
-	streamSyncer := NewStreamSyncer(streamConfig, logger)
-	commBridge := NewCommunicationBridge(bridgeConfig, logger)
-
-	// Create lifecycle manager
-	lifecycleManager := NewLifecycleManager(LifecycleConfig{
-		ProcessManager:      processManager,
-		ConfigParser:        configParser,
-		HandshakeManager:    handshakeManager,
-		StreamSyncer:        streamSyncer,
-		CommunicationBridge: commBridge,
-		HandshakeConfig:     handshakeConfig,
-		StreamConfig:        streamConfig,
-		BridgeConfig:        bridgeConfig,
-		Logger:              logger,
+	// Create unified subprocess manager
+	subprocessManager := NewSubprocessManager(SubprocessManagerConfig{
+		BaseConfig:      BaseConfig{}.WithDefaults(),
+		ExecutablePath:  parsedConfig.ExecutablePath,
+		Args:            parsedConfig.Args,
+		Env:             parsedConfig.Env,
+		HandshakeConfig: handshakeConfig,
+		StreamConfig:    streamConfig,
+		BridgeConfig:    bridgeConfig,
+		Logger:          logger,
 	})
 
 	plugin := &SubprocessPlugin[Req, Resp]{
-		processManager:   processManager,
-		configParser:     configParser,
-		lifecycleManager: lifecycleManager,
-		handshakeManager: handshakeManager,
-		streamSyncer:     streamSyncer,
-		commBridge:       commBridge,
-		handshakeConfig:  handshakeConfig,
-		streamConfig:     streamConfig,
-		bridgeConfig:     bridgeConfig,
-		logger:           logger,
+		// Unified management (simplified architecture)
+		subprocessManager: subprocessManager,
+		logger:            logger,
 	}
 
 	return plugin, nil
@@ -221,15 +218,16 @@ func (sp *SubprocessPlugin[Req, Resp]) Execute(ctx context.Context, execCtx Exec
 	sp.mutex.Lock()
 	defer sp.mutex.Unlock()
 
-	// Start subprocess if not already running
-	if !sp.processManager.IsStarted() {
-		if err := sp.startProcess(ctx); err != nil {
+	// Ensure subprocess is started with elegant initialization
+	if !sp.subprocessManager.IsStarted() {
+		if err := sp.ensureProcessStarted(ctx); err != nil {
 			return zero, NewProcessError("failed to start subprocess", err)
 		}
 	}
 
-	// Communication infrastructure is ready - requires RPC implementation (Priority 5)
-	if sp.commBridge == nil {
+	// Communication infrastructure ready - using direct subprocess communication
+	commBridge := sp.subprocessManager.GetCommunicationBridge()
+	if commBridge == nil {
 		return zero, NewCommunicationError("communication bridge not available", nil)
 	}
 
@@ -237,19 +235,364 @@ func (sp *SubprocessPlugin[Req, Resp]) Execute(ctx context.Context, execCtx Exec
 		"request_id", execCtx.RequestID,
 		"timeout", execCtx.Timeout)
 
-	return zero, NewRPCError("RPC communication protocol not implemented - will be completed in Priority 5", nil)
+	// Execute request with streamlined communication flow
+	result, err := sp.executeRequest(ctx, execCtx, request)
+	if err != nil {
+		return zero, err
+	}
+
+	return result, nil
 }
 
-// startProcess launches the subprocess and establishes communication with handshake.
-func (sp *SubprocessPlugin[Req, Resp]) startProcess(ctx context.Context) error {
-	if sp.processManager.IsStarted() {
+// ensureProcessStarted ensures the subprocess is started with elegant initialization.
+// This method consolidates the startup logic into a single, cohesive flow while maintaining
+// clear separation of concerns and robust error handling.
+func (sp *SubprocessPlugin[Req, Resp]) ensureProcessStarted(ctx context.Context) error {
+	if sp.subprocessManager.IsStarted() {
 		return nil
 	}
 
-	sp.logger.Info("Starting subprocess plugin with lifecycle manager")
+	sp.logger.Info("Starting subprocess plugin with streamlined initialization")
 
-	// Use lifecycle manager for coordinated startup
-	return sp.lifecycleManager.Startup(ctx)
+	// Prepare handshake information for elegant startup
+	handshakeConfig := sp.subprocessManager.GetHandshakeConfig()
+	handshakeInfo := HandshakeInfo{
+		ProtocolVersion: handshakeConfig.ProtocolVersion,
+		PluginType:      PluginTypeGRPC,
+		ServerAddress:   sp.subprocessManager.GetAddress(),
+		ServerPort:      sp.subprocessManager.GetPort(),
+		PluginName:      "subprocess-plugin",
+		PluginVersion:   "1.0.0",
+	}
+
+	// Prepare handshake environment using subprocess manager components
+	handshakeManager := sp.subprocessManager.GetHandshakeManager()
+	handshakeEnv := handshakeManager.PrepareEnvironment(handshakeInfo)
+
+	// Start communication bridge
+	if err := sp.subprocessManager.StartCommunicationBridge(); err != nil {
+		return NewCommunicationError("failed to start communication bridge", err)
+	}
+
+	// Create elegant setup function that configures communication pipes
+	setupFunc := func(cmd *exec.Cmd) error {
+		sp.logger.Debug("Configuring communication pipes during elegant startup")
+
+		// Configure stdin pipe for JSON requests
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			return NewProcessError("failed to create stdin pipe during startup", err)
+		}
+		sp.stdin = stdin
+
+		// Configure stdout pipe for JSON responses
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return NewProcessError("failed to create stdout pipe during startup", err)
+		}
+		sp.stdout = stdout
+
+		// Keep stderr separate for logging/debugging
+		// The stream syncer can still configure stderr for stream synchronization
+
+		sp.logger.Debug("Communication pipes configured successfully during elegant startup")
+		return nil
+	}
+
+	// Start the process with elegant setup function
+	if err := sp.subprocessManager.StartWithEnvironmentAndSetup(ctx, handshakeEnv, setupFunc); err != nil {
+		// Cleanup communication bridge on failure
+		if stopErr := sp.subprocessManager.StopCommunicationBridge(); stopErr != nil {
+			sp.logger.Warn("Failed to stop communication bridge during cleanup", "error", stopErr)
+		}
+		return err
+	}
+
+	// Start stream synchronization for stderr only (stdout is used for communication)
+	streamConfig := sp.subprocessManager.GetStreamConfig()
+	streamSyncer := sp.subprocessManager.GetStreamSyncer()
+	if streamConfig.SyncStderr {
+		if err := streamSyncer.Start(); err != nil {
+			sp.logger.Warn("Failed to start stream synchronization", "error", err)
+		}
+	}
+
+	sp.logger.Info("Subprocess plugin started successfully with elegant initialization")
+	return nil
+}
+
+// executeRequest executes a request with streamlined communication flow.
+// This method combines the logic from executeViaStandardIO and executeJSONProtocol
+// for better readability and reduced complexity while maintaining thread safety.
+func (sp *SubprocessPlugin[Req, Resp]) executeRequest(ctx context.Context, execCtx ExecutionContext, request Req) (Resp, error) {
+	var zero Resp
+
+	// Serialize subprocess communication to prevent race conditions
+	sp.communicationMutex.Lock()
+	defer sp.communicationMutex.Unlock()
+
+	sp.logger.Debug("Executing subprocess request with streamlined flow",
+		"request_id", execCtx.RequestID)
+
+	// Get the process command and ensure we have access to stdin/stdout
+	cmd := sp.subprocessManager.GetCommand()
+	if cmd == nil {
+		return zero, NewProcessError("subprocess command not available", nil)
+	}
+
+	// Get or create communication pipes
+	stdin, stdout, err := sp.getCommunicationPipes(cmd)
+	if err != nil {
+		return zero, err
+	}
+
+	// Create execution context with timeout
+	execCtxWithTimeout := ctx
+	if execCtx.Timeout > 0 {
+		var cancel context.CancelFunc
+		execCtxWithTimeout, cancel = context.WithTimeout(ctx, execCtx.Timeout)
+		defer cancel()
+	}
+
+	// Execute JSON-based subprocess communication
+	response, err := sp.performJSONCommunication(execCtxWithTimeout, execCtx, request, stdin, stdout)
+	if err != nil {
+		return zero, err
+	}
+
+	sp.logger.Debug("Subprocess execution completed successfully",
+		"request_id", execCtx.RequestID)
+
+	return response, nil
+}
+
+// getCommunicationPipes retrieves or creates stdin and stdout pipes for communication.
+// This method provides elegant access to communication pipes with centralized management.
+func (sp *SubprocessPlugin[Req, Resp]) getCommunicationPipes(cmd *exec.Cmd) (io.WriteCloser, io.ReadCloser, error) {
+	// Ensure pipes are properly configured
+	if err := sp.ensureCommunicationPipes(cmd); err != nil {
+		return nil, nil, err
+	}
+
+	// Return the configured pipes
+	return sp.stdin, sp.stdout, nil
+}
+
+// ensureCommunicationPipes ensures that stdin and stdout pipes are properly configured.
+// This method provides elegant, centralized pipe management with robust error handling.
+func (sp *SubprocessPlugin[Req, Resp]) ensureCommunicationPipes(cmd *exec.Cmd) error {
+	// Ensure stdin pipe is configured
+	if err := sp.ensureStdinPipe(cmd); err != nil {
+		return NewCommunicationError("failed to ensure stdin pipe", err)
+	}
+
+	// Ensure stdout pipe is configured
+	if err := sp.ensureStdoutPipe(cmd); err != nil {
+		return NewCommunicationError("failed to ensure stdout pipe", err)
+	}
+
+	return nil
+}
+
+// ensureStdinPipe ensures the stdin pipe is properly configured with elegant caching logic.
+func (sp *SubprocessPlugin[Req, Resp]) ensureStdinPipe(cmd *exec.Cmd) error {
+	// Use cached pipe if available
+	if sp.stdin != nil {
+		return nil
+	}
+
+	// Check if stdin is already configured by another component
+	if cmd.Stdin != nil {
+		if writeCloser, ok := cmd.Stdin.(io.WriteCloser); ok {
+			sp.stdin = writeCloser
+			sp.logger.Debug("Using existing stdin pipe for subprocess communication")
+			return nil
+		}
+		return NewProcessError("stdin already configured but not writable", nil)
+	}
+
+	// Process is already started, we can't create new pipes
+	if sp.subprocessManager.IsStarted() {
+		return NewProcessError("cannot create stdin pipe after process started", nil)
+	}
+
+	// Create new stdin pipe
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return NewProcessError("failed to create stdin pipe", err)
+	}
+
+	sp.stdin = stdin
+	sp.logger.Debug("Created stdin pipe for subprocess communication")
+	return nil
+}
+
+// ensureStdoutPipe ensures the stdout pipe is properly configured with elegant caching logic.
+func (sp *SubprocessPlugin[Req, Resp]) ensureStdoutPipe(cmd *exec.Cmd) error {
+	// Use cached pipe if available
+	if sp.stdout != nil {
+		return nil
+	}
+
+	// Check if stdout is already configured by another component
+	if cmd.Stdout != nil {
+		if readCloser, ok := cmd.Stdout.(io.ReadCloser); ok {
+			sp.stdout = readCloser
+			sp.logger.Debug("Using existing stdout pipe for subprocess communication")
+			return nil
+		}
+		return NewProcessError("stdout already configured but not readable", nil)
+	}
+
+	// Process is already started, we can't create new pipes
+	if sp.subprocessManager.IsStarted() {
+		return NewProcessError("cannot create stdout pipe after process started", nil)
+	}
+
+	// Create new stdout pipe
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return NewProcessError("failed to create stdout pipe", err)
+	}
+
+	sp.stdout = stdout
+	sp.logger.Debug("Created stdout pipe for subprocess communication")
+	return nil
+}
+
+// performJSONCommunication performs the complete JSON-based subprocess communication.
+// This method handles the core JSON protocol communication with the subprocess.
+func (sp *SubprocessPlugin[Req, Resp]) performJSONCommunication(
+	ctx context.Context,
+	execCtx ExecutionContext,
+	request Req,
+	stdin io.WriteCloser,
+	stdout io.ReadCloser,
+) (Resp, error) {
+	var zero Resp
+
+	// Create subprocess request wrapper following the standard protocol
+	subprocessRequest := SubprocessRequest{
+		ID:      execCtx.RequestID,
+		Method:  "execute",
+		Payload: request,
+		Context: execCtx,
+	}
+
+	// Serialize request to JSON
+	requestData, err := json.Marshal(subprocessRequest)
+	if err != nil {
+		return zero, NewSerializationError("failed to marshal subprocess request", err)
+	}
+
+	sp.logger.Debug("Sending JSON request to subprocess",
+		"request_id", execCtx.RequestID,
+		"size", len(requestData))
+
+	// Send request to subprocess with timeout
+	if err := sp.sendJSONRequest(ctx, stdin, requestData); err != nil {
+		return zero, err
+	}
+
+	// Read JSON response from subprocess with timeout
+	responseData, err := sp.readJSONResponse(ctx, stdout)
+	if err != nil {
+		return zero, err
+	}
+
+	sp.logger.Debug("Received JSON response from subprocess",
+		"request_id", execCtx.RequestID,
+		"size", len(responseData))
+
+	// Deserialize response
+	var subprocessResponse SubprocessResponse[Resp]
+	if err := json.Unmarshal(responseData, &subprocessResponse); err != nil {
+		return zero, NewSerializationError("failed to unmarshal subprocess response", err)
+	}
+
+	// Validate response
+	if err := sp.validateResponse(&subprocessResponse, execCtx.RequestID); err != nil {
+		return zero, err
+	}
+
+	return subprocessResponse.Result, nil
+}
+
+// sendJSONRequest sends a JSON request to subprocess stdin.
+func (sp *SubprocessPlugin[Req, Resp]) sendJSONRequest(ctx context.Context, stdin io.WriteCloser, data []byte) error {
+	done := make(chan error, 1)
+
+	go func() {
+		// Write JSON request followed by newline (line-delimited JSON protocol)
+		_, err := stdin.Write(append(data, '\n'))
+		if err != nil {
+			done <- NewCommunicationError("failed to write JSON request to subprocess stdin", err)
+			return
+		}
+		done <- nil
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return NewCommunicationError("timeout writing JSON request to subprocess", ctx.Err())
+	}
+}
+
+// readJSONResponse reads a JSON response from subprocess stdout.
+func (sp *SubprocessPlugin[Req, Resp]) readJSONResponse(ctx context.Context, stdout io.ReadCloser) ([]byte, error) {
+	done := make(chan struct {
+		data []byte
+		err  error
+	}, 1)
+
+	go func() {
+		// Read JSON response line (line-delimited JSON protocol)
+		scanner := bufio.NewScanner(stdout)
+		if scanner.Scan() {
+			data := make([]byte, len(scanner.Bytes()))
+			copy(data, scanner.Bytes())
+			done <- struct {
+				data []byte
+				err  error
+			}{data: data, err: nil}
+		} else {
+			err := scanner.Err()
+			if err == nil {
+				err = io.EOF
+			}
+			done <- struct {
+				data []byte
+				err  error
+			}{data: nil, err: NewCommunicationError("failed to read JSON response from subprocess stdout", err)}
+		}
+	}()
+
+	select {
+	case result := <-done:
+		return result.data, result.err
+	case <-ctx.Done():
+		return nil, NewCommunicationError("timeout reading JSON response from subprocess", ctx.Err())
+	}
+}
+
+// validateResponse validates the subprocess response.
+func (sp *SubprocessPlugin[Req, Resp]) validateResponse(response *SubprocessResponse[Resp], expectedRequestID string) error {
+	// Check for subprocess errors
+	if response.Error != nil {
+		return NewProcessError("subprocess execution failed", fmt.Errorf("%s", *response.Error))
+	}
+
+	// Validate response ID matches request ID
+	if response.ID != expectedRequestID {
+		return NewCommunicationError(
+			fmt.Sprintf("response ID mismatch: expected %s, got %s", expectedRequestID, response.ID),
+			nil,
+		)
+	}
+
+	return nil
 }
 
 // Stop gracefully stops the subprocess plugin.
@@ -257,15 +600,15 @@ func (sp *SubprocessPlugin[Req, Resp]) Stop(ctx context.Context) error {
 	sp.mutex.Lock()
 	defer sp.mutex.Unlock()
 
-	if !sp.processManager.IsStarted() || sp.processManager.IsStopping() {
+	if !sp.subprocessManager.IsStarted() || sp.subprocessManager.IsStopping() {
 		return nil
 	}
 
-	processInfo := sp.processManager.GetProcessInfo()
+	processInfo := sp.subprocessManager.GetProcessInfo()
 	sp.logger.Info("Stopping subprocess plugin", "pid", processInfo.PID)
 
-	// Use lifecycle manager for coordinated shutdown
-	return sp.lifecycleManager.Shutdown(ctx)
+	// Use subprocess manager for coordinated shutdown
+	return sp.subprocessManager.Stop(ctx)
 }
 
 // Health implements the Plugin interface - checks if the subprocess is healthy.
@@ -275,7 +618,7 @@ func (sp *SubprocessPlugin[Req, Resp]) Health(ctx context.Context) HealthStatus 
 
 	now := time.Now()
 
-	if !sp.processManager.IsStarted() {
+	if !sp.subprocessManager.IsStarted() {
 		return HealthStatus{
 			Status:       StatusOffline,
 			Message:      "subprocess not started",
@@ -284,7 +627,7 @@ func (sp *SubprocessPlugin[Req, Resp]) Health(ctx context.Context) HealthStatus 
 		}
 	}
 
-	processInfo := sp.processManager.GetProcessInfo()
+	processInfo := sp.subprocessManager.GetProcessInfo()
 	if processInfo == nil {
 		return HealthStatus{
 			Status:       StatusUnhealthy,
@@ -306,7 +649,7 @@ func (sp *SubprocessPlugin[Req, Resp]) Health(ctx context.Context) HealthStatus 
 	start := time.Now()
 
 	// Check if process is still alive using process manager
-	if !sp.processManager.IsAlive() {
+	if !sp.subprocessManager.IsAlive() {
 		return HealthStatus{
 			Status:       StatusUnhealthy,
 			Message:      "subprocess process check failed",
@@ -325,7 +668,7 @@ func (sp *SubprocessPlugin[Req, Resp]) Health(ctx context.Context) HealthStatus 
 
 // GetInfo returns information about the subprocess.
 func (sp *SubprocessPlugin[Req, Resp]) GetInfo() *ProcessInfo {
-	return sp.processManager.GetProcessInfo()
+	return sp.subprocessManager.GetProcessInfo()
 }
 
 // Close implements the Plugin interface - gracefully shuts down the subprocess.
@@ -345,7 +688,7 @@ func (sp *SubprocessPlugin[Req, Resp]) Info() PluginInfo {
 	metadata["transport"] = string(TransportExecutable)
 
 	// Get process information from process manager
-	processInfo := sp.processManager.GetProcessInfo()
+	processInfo := sp.subprocessManager.GetProcessInfo()
 	if processInfo != nil {
 		metadata["pid"] = fmt.Sprintf("%d", processInfo.PID)
 		metadata["status"] = processInfo.Status.String()
@@ -360,4 +703,32 @@ func (sp *SubprocessPlugin[Req, Resp]) Info() PluginInfo {
 		Capabilities: []string{"subprocess", "process-management", "standard-protocol", "refactored-soc"},
 		Metadata:     metadata,
 	}
+}
+
+// NewSubprocessPluginWithManager creates a subprocess plugin with a pre-configured manager.
+//
+// This function allows creating subprocess plugins with a unified subprocess manager,
+// providing better integration with the simplified factory pattern while maintaining
+// compatibility with existing interfaces.
+func NewSubprocessPluginWithManager[Req, Resp any](
+	config PluginConfig,
+	manager *SubprocessManager,
+	logger Logger) (Plugin[Req, Resp], error) {
+
+	if manager == nil {
+		return nil, NewPluginCreationError("subprocess manager cannot be nil", nil)
+	}
+
+	if logger == nil {
+		logger = DefaultLogger()
+	}
+
+	// Currently using the factory pattern for compatibility with existing plugin interfaces.
+	// The passed manager parameter is available for future direct integration when the
+	// plugin architecture is refactored to support direct manager injection.
+	//
+	// NOTE: Future enhancement - utilize the passed manager directly instead of factory
+	// This would require extending the plugin interface to accept pre-configured managers
+	factory := NewSubprocessPluginFactory[Req, Resp](logger)
+	return factory.CreatePlugin(config)
 }

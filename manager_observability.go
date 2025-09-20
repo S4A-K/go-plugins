@@ -577,7 +577,12 @@ func (om *ObservabilityManager) getCircuitBreakerStateValue(pluginMetric *Plugin
 		return 0 // Default to closed
 	}
 
-	switch state.(string) {
+	stateStr, ok := state.(string)
+	if !ok {
+		return 0 // Default to closed if not a string
+	}
+
+	switch stateStr {
 	case "closed":
 		return 0
 	case "open":

@@ -122,8 +122,16 @@ func TestObservabilityManagerCircuitBreakerMetrics(t *testing.T) {
 		t.Fatal("Plugin metrics should be created")
 	}
 
-	if state := metrics.CircuitBreakerState.Load().(string); state != "open" {
-		t.Errorf("Expected circuit breaker state 'open', got '%s'", state)
+	if stateRaw := metrics.CircuitBreakerState.Load(); stateRaw != nil {
+		if state, ok := stateRaw.(string); ok {
+			if state != "open" {
+				t.Errorf("Expected circuit breaker state 'open', got '%s'", state)
+			}
+		} else {
+			t.Errorf("Expected circuit breaker state to be string, got %T", stateRaw)
+		}
+	} else {
+		t.Error("Expected circuit breaker state to be set")
 	}
 
 	if metrics.CircuitBreakerTrips.Load() != 1 {
@@ -159,8 +167,12 @@ func TestObservabilityManagerGetMetrics(t *testing.T) {
 		t.Fatal("Global metrics should be present")
 	}
 
-	if globalMetrics["total_requests"].(int64) != 1 {
-		t.Errorf("Expected 1 global total request, got %v", globalMetrics["total_requests"])
+	if totalReq, ok := globalMetrics["total_requests"].(int64); ok {
+		if totalReq != 1 {
+			t.Errorf("Expected 1 global total request, got %v", totalReq)
+		}
+	} else {
+		t.Errorf("Expected total_requests to be int64, got %T", globalMetrics["total_requests"])
 	}
 
 	// Check plugin metrics
@@ -174,12 +186,20 @@ func TestObservabilityManagerGetMetrics(t *testing.T) {
 		t.Fatal("Test plugin metrics should be present")
 	}
 
-	if pluginData["successful_requests"].(int64) != 1 {
-		t.Errorf("Expected 1 successful request, got %v", pluginData["successful_requests"])
+	if successReq, ok := pluginData["successful_requests"].(int64); ok {
+		if successReq != 1 {
+			t.Errorf("Expected 1 successful request, got %v", successReq)
+		}
+	} else {
+		t.Errorf("Expected successful_requests to be int64, got %T", pluginData["successful_requests"])
 	}
 
-	if pluginData["success_rate"].(float64) != 100.0 {
-		t.Errorf("Expected 100%% success rate, got %v", pluginData["success_rate"])
+	if successRate, ok := pluginData["success_rate"].(float64); ok {
+		if successRate != 100.0 {
+			t.Errorf("Expected 100%% success rate, got %v", successRate)
+		}
+	} else {
+		t.Errorf("Expected success_rate to be float64, got %T", pluginData["success_rate"])
 	}
 }
 

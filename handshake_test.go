@@ -243,17 +243,32 @@ func TestProtocolError(t *testing.T) {
 }
 
 func TestIsHandshakeTimeoutError(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Microsecond)
+	// Test with a very short timeout to trigger context deadline exceeded
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
 	defer cancel()
 
-	time.Sleep(time.Millisecond) // Ensure timeout occurs
+	// Wait for the timeout to definitely occur
+	time.Sleep(10 * time.Millisecond)
 
-	if !IsHandshakeTimeoutError(ctx.Err()) {
-		t.Error("Expected context deadline exceeded to be identified as handshake timeout")
+	// Verify the context error is properly identified as handshake timeout
+	ctxErr := ctx.Err()
+	if ctxErr == nil {
+		t.Fatal("Expected context to have timed out")
 	}
 
+	if !IsHandshakeTimeoutError(ctxErr) {
+		t.Errorf("Expected context deadline exceeded to be identified as handshake timeout, got: %v", ctxErr)
+	}
+
+	// Test that nil error is not identified as handshake timeout
 	if IsHandshakeTimeoutError(nil) {
 		t.Error("Expected nil error to not be identified as handshake timeout")
+	}
+
+	// Test with a regular error to ensure it's not misidentified
+	regularErr := NewCommunicationError("regular error", nil)
+	if IsHandshakeTimeoutError(regularErr) {
+		t.Error("Expected regular error to not be identified as handshake timeout")
 	}
 }
 

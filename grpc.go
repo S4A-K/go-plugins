@@ -420,7 +420,7 @@ func (c ProtobufPluginServiceClient) ExecuteNative(ctx context.Context, request 
 
 	err := conn.Invoke(ctx, "/plugin.PluginService/Execute", request, &response)
 	if err != nil {
-		return nil, NewRPCError("gRPC call failed", err)
+		return nil, NewGRPCTransportError(err)
 	}
 
 	return response, nil
