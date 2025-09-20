@@ -97,27 +97,92 @@ func (cp *ConfigParser) parseArgs(config PluginConfig) []string {
 // 2. config.Options["env"] as []string in "KEY=VALUE" format
 // 3. config.Options["environment"] as map[string]string
 // 4. config.Annotations with "env_" prefix (e.g., "env_DEBUG=1")
+// parseEnv extracts environment variables from multiple configuration sources.
+//
+// This function consolidates environment variable parsing from different parts
+// of the PluginConfig structure, applying them in order of precedence:
+//  1. Direct Env field (highest precedence)
+//  2. Options["env"] as string array
+//  3. Options["environment"] as key-value map
+//  4. Annotations with "env_" prefix (lowest precedence)
+//
+// The function is designed for extensibility - new environment sources can be
+// easily added by implementing additional parsing strategies and registering
+// them in the parsing pipeline.
+//
+// Returns a slice of environment variables in "KEY=VALUE" format, ready
+// for use with subprocess execution.
 func (cp *ConfigParser) parseEnv(config PluginConfig) []string {
 	var result []string
 
-	// Use config.Env field first (direct approach)
+	// Parse environment variables from each source in precedence order
+	result = append(result, cp.parseEnvFromDirectField(config)...)
+	result = append(result, cp.parseEnvFromOptionsArray(config)...)
+	result = append(result, cp.parseEnvFromOptionsMap(config)...)
+	result = append(result, cp.parseEnvFromAnnotations(config)...)
+
+	return result
+}
+
+// parseEnvFromDirectField extracts environment variables from config.Env field.
+//
+// This is the highest precedence source for environment variables, providing
+// direct access to a pre-formatted array of "KEY=VALUE" strings.
+//
+// Returns the environment variables as-is without modification.
+func (cp *ConfigParser) parseEnvFromDirectField(config PluginConfig) []string {
 	if len(config.Env) > 0 {
-		result = append(result, config.Env...)
+		return config.Env
 	}
+	return nil
+}
 
-	// Try config.Options["env"] as []string
+// parseEnvFromOptionsArray extracts environment variables from config.Options["env"].
+//
+// This source expects a []string slice containing pre-formatted "KEY=VALUE" strings.
+// It provides a secondary way to specify environment variables through the
+// Options map when the direct Env field is not suitable.
+//
+// Returns the environment variables as-is if the source exists and is valid.
+func (cp *ConfigParser) parseEnvFromOptionsArray(config PluginConfig) []string {
 	if env, ok := config.Options["env"].([]string); ok {
-		result = append(result, env...)
+		return env
+	}
+	return nil
+}
+
+// parseEnvFromOptionsMap extracts environment variables from config.Options["environment"].
+//
+// This source expects a map[string]string where keys are environment variable
+// names and values are their corresponding values. This provides a structured
+// way to specify environment variables when key-value separation is preferred.
+//
+// Returns environment variables formatted as "KEY=VALUE" strings.
+func (cp *ConfigParser) parseEnvFromOptionsMap(config PluginConfig) []string {
+	envMap, ok := config.Options["environment"].(map[string]string)
+	if !ok {
+		return nil
 	}
 
-	// Try config.Options["environment"] as map[string]string
-	if envMap, ok := config.Options["environment"].(map[string]string); ok {
-		for key, value := range envMap {
-			result = append(result, fmt.Sprintf("%s=%s", key, value))
-		}
+	var result []string
+	for key, value := range envMap {
+		result = append(result, fmt.Sprintf("%s=%s", key, value))
 	}
+	return result
+}
 
-	// Try config.Annotations with "env_" prefix
+// parseEnvFromAnnotations extracts environment variables from config.Annotations.
+//
+// This source provides environment variables through annotations with "env_" prefix.
+// For example, annotation "env_DEBUG=true" becomes environment variable "DEBUG=true".
+// This is the lowest precedence source, useful for metadata-driven configuration.
+//
+// Only non-empty annotation values are processed. Empty keys after prefix removal
+// are ignored to prevent malformed environment variables.
+//
+// Returns environment variables formatted as "KEY=VALUE" strings.
+func (cp *ConfigParser) parseEnvFromAnnotations(config PluginConfig) []string {
+	var result []string
 	for key, value := range config.Annotations {
 		if strings.HasPrefix(key, "env_") && value != "" {
 			envKey := strings.TrimPrefix(key, "env_")
@@ -126,7 +191,6 @@ func (cp *ConfigParser) parseEnv(config PluginConfig) []string {
 			}
 		}
 	}
-
 	return result
 }
 

@@ -360,24 +360,44 @@ func (sm *SubprocessManager) configureStreamSynchronization() error {
 	}
 
 	// Configure stdout stream if enabled and available
-	if sm.streamConfig.SyncStdout && sm.cmd.Stdout == nil {
-		if stdout, err := sm.cmd.StdoutPipe(); err == nil {
-			if addErr := sm.streamSyncer.AddStream(StreamStdout, stdout); addErr != nil {
-				sm.logger.Warn("Failed to add stdout stream", "error", addErr)
-			}
-		}
-	}
+	sm.configureStdoutStream()
 
 	// Configure stderr stream if enabled and available
-	if sm.streamConfig.SyncStderr && sm.cmd.Stderr == nil {
-		if stderr, err := sm.cmd.StderrPipe(); err == nil {
-			if addErr := sm.streamSyncer.AddStream(StreamStderr, stderr); addErr != nil {
-				sm.logger.Warn("Failed to add stderr stream", "error", addErr)
-			}
-		}
-	}
+	sm.configureStderrStream()
 
 	return nil
+}
+
+// configureStdoutStream configures stdout stream synchronization if enabled and available
+func (sm *SubprocessManager) configureStdoutStream() {
+	if !sm.streamConfig.SyncStdout || sm.cmd.Stdout != nil {
+		return
+	}
+
+	stdout, err := sm.cmd.StdoutPipe()
+	if err != nil {
+		return
+	}
+
+	if addErr := sm.streamSyncer.AddStream(StreamStdout, stdout); addErr != nil {
+		sm.logger.Warn("Failed to add stdout stream", "error", addErr)
+	}
+}
+
+// configureStderrStream configures stderr stream synchronization if enabled and available
+func (sm *SubprocessManager) configureStderrStream() {
+	if !sm.streamConfig.SyncStderr || sm.cmd.Stderr != nil {
+		return
+	}
+
+	stderr, err := sm.cmd.StderrPipe()
+	if err != nil {
+		return
+	}
+
+	if addErr := sm.streamSyncer.AddStream(StreamStderr, stderr); addErr != nil {
+		sm.logger.Warn("Failed to add stderr stream", "error", addErr)
+	}
 }
 
 // executeAndInitializeProcess starts the subprocess and initializes process monitoring.

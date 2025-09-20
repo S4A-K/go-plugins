@@ -470,40 +470,154 @@ func (d *DiscoveryEngine) parseManifestFile(filePath string) (*DiscoveryResult, 
 	}, nil
 }
 
-// validateManifest performs basic validation on a plugin manifest.
-func (d *DiscoveryEngine) validateManifest(manifest *PluginManifest) error {
+// validateManifest performs comprehensive validation on a plugin manifest including security checks.
+// validateRequiredFields validates that all required manifest fields are present
+func (d *DiscoveryEngine) validateRequiredFields(manifest *PluginManifest) error {
 	if manifest.Name == "" {
 		return NewDiscoveryError("plugin name is required", nil)
 	}
-
 	if manifest.Version == "" {
 		return NewDiscoveryError("plugin version is required", nil)
 	}
-
 	if manifest.Transport == "" {
 		return NewDiscoveryError("plugin transport is required", nil)
 	}
-
 	if manifest.Endpoint == "" {
 		return NewDiscoveryError("plugin endpoint is required", nil)
 	}
+	return nil
+}
 
-	// Validate transport type
+// validateSecurityConstraints validates security aspects of the manifest
+func (d *DiscoveryEngine) validateSecurityConstraints(manifest *PluginManifest) error {
+	// SECURITY: Validate plugin name for path traversal and dangerous characters
+	if err := d.validatePluginNameSecurity(manifest.Name); err != nil {
+		return NewDiscoveryError("plugin name security validation failed", err)
+	}
+
+	// SECURITY: Validate endpoint for path traversal (for executable transport)
+	if manifest.Transport == TransportExecutable {
+		if err := d.validateEndpointSecurity(manifest.Endpoint); err != nil {
+			return NewDiscoveryError("plugin endpoint security validation failed", err)
+		}
+	}
+
+	return nil
+}
+
+// validateTransportType validates that the transport type is supported
+func (d *DiscoveryEngine) validateTransportType(transport TransportType) error {
 	validTransports := []TransportType{
 		TransportGRPC, TransportGRPCTLS, TransportExecutable,
 	}
 
-	validTransport := false
 	for _, valid := range validTransports {
-		if manifest.Transport == valid {
-			validTransport = true
-			break
+		if transport == valid {
+			return nil
 		}
 	}
 
-	if !validTransport {
-		return NewUnsupportedTransportError(manifest.Transport)
+	return NewUnsupportedTransportError(transport)
+}
+
+func (d *DiscoveryEngine) validateManifest(manifest *PluginManifest) error {
+	if err := d.validateRequiredFields(manifest); err != nil {
+		return err
 	}
+
+	if err := d.validateSecurityConstraints(manifest); err != nil {
+		return err
+	}
+
+	if err := d.validateTransportType(manifest.Transport); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// checkPathTraversalPatterns validates against path traversal attacks
+func (d *DiscoveryEngine) checkPathTraversalPatterns(name string) error {
+	if strings.Contains(name, "..") {
+		return NewPathTraversalError(name)
+	}
+
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return NewSecurityValidationError("plugin name contains path separator characters", nil).
+			WithContext("plugin_name", name).
+			WithContext("invalid_characters", "path_separators")
+	}
+
+	return nil
+}
+
+// checkControlCharacters validates against control characters and null bytes
+func (d *DiscoveryEngine) checkControlCharacters(name string) error {
+	for _, r := range name {
+		if r < 32 || r == 127 {
+			return NewSecurityValidationError("plugin name contains control character", nil).
+				WithContext("plugin_name", name).
+				WithContext("control_character_code", r).
+				WithContext("validation_type", "control_character_check")
+		}
+	}
+
+	if strings.Contains(name, "\x00") {
+		return NewSecurityValidationError("plugin name contains null byte", nil).
+			WithContext("plugin_name", name).
+			WithContext("validation_type", "null_byte_check")
+	}
+
+	return nil
+}
+
+// checkDangerousPatterns validates against shell injection and dangerous characters
+func (d *DiscoveryEngine) checkDangerousPatterns(name string) error {
+	dangerousPatterns := []string{"~", "|", "&", ";", "$", "`", "(", ")", "[", "]", "{", "}", "<", ">"}
+	for _, pattern := range dangerousPatterns {
+		if strings.Contains(name, pattern) {
+			return NewSecurityValidationError("plugin name contains dangerous character", nil).
+				WithContext("plugin_name", name).
+				WithContext("dangerous_character", pattern).
+				WithContext("validation_type", "dangerous_character_check")
+		}
+	}
+	return nil
+}
+
+// validatePluginNameSecurity validates plugin name for path traversal and dangerous characters.
+func (d *DiscoveryEngine) validatePluginNameSecurity(name string) error {
+	if err := d.checkPathTraversalPatterns(name); err != nil {
+		return err
+	}
+
+	if err := d.checkControlCharacters(name); err != nil {
+		return err
+	}
+
+	if err := d.checkDangerousPatterns(name); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateEndpointSecurity validates endpoint for security issues (mainly for executable transport).
+func (d *DiscoveryEngine) validateEndpointSecurity(endpoint string) error {
+	// For executable transport, check for path traversal in the executable path
+	if strings.Contains(endpoint, "..") {
+		return NewPathTraversalError(endpoint)
+	}
+
+	// Check for null bytes
+	if strings.Contains(endpoint, "\x00") {
+		return NewSecurityValidationError("endpoint contains null byte", nil).
+			WithContext("endpoint", endpoint).
+			WithContext("validation_type", "null_byte_check")
+	}
+
+	// Additional validation for executable paths can be added here
+	// (e.g., check if path is absolute, validate against whitelist, etc.)
 
 	return nil
 }

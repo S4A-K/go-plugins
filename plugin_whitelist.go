@@ -361,8 +361,8 @@ func (sv *SecurityValidator) Disable() error {
 
 // ValidatePlugin validates a plugin against the security whitelist
 func (sv *SecurityValidator) ValidatePlugin(pluginConfig PluginConfig, pluginPath string) (*ValidationResult, error) {
-	sv.mutex.RLock()
-	defer sv.mutex.RUnlock()
+	sv.mutex.Lock()
+	defer sv.mutex.Unlock()
 
 	result := &ValidationResult{
 		Policy:    sv.config.Policy,
@@ -373,10 +373,9 @@ func (sv *SecurityValidator) ValidatePlugin(pluginConfig PluginConfig, pluginPat
 	sv.stats.ValidationAttempts++
 	sv.stats.LastValidation = result.Timestamp
 
-	// If disabled, always authorize
+	// If disabled, don't perform validation - return error
 	if !sv.enabled || sv.config.Policy == SecurityPolicyDisabled {
-		result.Authorized = true
-		return result, nil
+		return nil, NewSecurityValidationError("security validation disabled", nil)
 	}
 
 	// If audit-only mode, always authorize but log

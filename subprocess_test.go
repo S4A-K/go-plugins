@@ -208,6 +208,7 @@ func TestSubprocessPlugin_Info(t *testing.T) {
 
 	config := PluginConfig{
 		Name:       "test-plugin",
+		Version:    "1.0.0", // Add version to config
 		Transport:  TransportExecutable,
 		Endpoint:   testExecutable,
 		Executable: testExecutable,
@@ -220,8 +221,8 @@ func TestSubprocessPlugin_Info(t *testing.T) {
 
 	info := plugin.Info()
 
-	if info.Name != "subprocess-plugin" {
-		t.Errorf("Expected name 'subprocess-plugin', got %s", info.Name)
+	if info.Name != "test-plugin" { // Now expects the actual name from config
+		t.Errorf("Expected name 'test-plugin', got %s", info.Name)
 	}
 
 	if info.Version != "1.0.0" {

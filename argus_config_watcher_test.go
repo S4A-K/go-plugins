@@ -160,7 +160,9 @@ func TestLibraryConfigWatcher_NewCreation(t *testing.T) {
 
 			// Cleanup
 			if watcher != nil {
-				_ = watcher.Stop()
+				if err := watcher.Stop(); err != nil {
+					t.Logf("Warning: Failed to stop watcher: %v", err)
+				}
 			}
 		})
 	}
@@ -274,7 +276,9 @@ func TestLibraryConfigWatcher_HotReload(t *testing.T) {
 		t.Fatalf("Failed to start watcher: %v", err)
 	}
 	defer func() {
-		_ = watcher.Stop()
+		if err := watcher.Stop(); err != nil {
+			t.Logf("Warning: Failed to stop watcher: %v", err)
+		}
 	}()
 
 	// Wait for initial load
@@ -470,7 +474,9 @@ func TestLibraryConfigWatcher_ConfigReload(t *testing.T) {
 		t.Fatalf("Failed to start watcher: %v", err)
 	}
 	defer func() {
-		_ = watcher.Stop()
+		if err := watcher.Stop(); err != nil {
+			t.Logf("Warning: Failed to stop watcher: %v", err)
+		}
 	}()
 
 	t.Run("valid configuration change", func(t *testing.T) {
@@ -572,7 +578,9 @@ func TestLibraryConfigWatcher_EnvironmentExpansion(t *testing.T) {
 			t.Fatalf("Failed to set %s: %v", key, err)
 		}
 		defer func(k string) {
-			_ = os.Unsetenv(k)
+			if err := os.Unsetenv(k); err != nil {
+				t.Logf("Warning: Failed to unset %s: %v", k, err)
+			}
 		}(key)
 	}
 
@@ -634,7 +642,9 @@ func TestLibraryConfigWatcher_EnvironmentExpansion(t *testing.T) {
 		t.Fatalf("Failed to start watcher: %v", err)
 	}
 	defer func() {
-		_ = watcher.Stop()
+		if err := watcher.Stop(); err != nil {
+			t.Logf("Warning: Failed to stop watcher: %v", err)
+		}
 	}()
 
 	t.Run("environment variables expanded correctly", func(t *testing.T) {

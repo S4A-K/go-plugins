@@ -14,6 +14,7 @@ package goplugins
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -326,6 +327,11 @@ func (dl *DynamicLoader[Req, Resp]) DisableAutoLoading() error {
 //
 // Returns error if loading fails at any stage.
 func (dl *DynamicLoader[Req, Resp]) LoadDiscoveredPlugin(ctx context.Context, pluginName string) error {
+	return dl.loadDiscoveredPluginInternal(ctx, pluginName, make(map[string]bool))
+}
+
+// loadDiscoveredPluginInternal is the internal implementation that tracks loading path for circular dependency detection.
+func (dl *DynamicLoader[Req, Resp]) loadDiscoveredPluginInternal(ctx context.Context, pluginName string, loadingPath map[string]bool) error {
 	// Get discovered plugin information
 	discovered := dl.discoveryEngine.GetDiscoveredPlugins()
 	result, exists := discovered[pluginName]
@@ -352,8 +358,8 @@ func (dl *DynamicLoader[Req, Resp]) LoadDiscoveredPlugin(ctx context.Context, pl
 		return NewPluginExecutionFailedError(pluginName, err)
 	}
 
-	// Resolve and load dependencies
-	if err := dl.resolveDependencies(ctx, pluginName); err != nil {
+	// Resolve and load dependencies with path tracking
+	if err := dl.resolveDependenciesWithPath(ctx, pluginName, loadingPath); err != nil {
 		return NewPluginExecutionFailedError(pluginName, err)
 	}
 
@@ -486,6 +492,13 @@ func (dl *DynamicLoader[Req, Resp]) Close() error {
 
 // validateVersionCompatibility checks if a plugin version is compatible.
 func (dl *DynamicLoader[Req, Resp]) validateVersionCompatibility(manifest *PluginManifest) error {
+	// BUG FIX: Always validate plugin version format first (security critical!)
+	// This prevents malformed versions from bypassing validation
+	pluginVersion, err := ParsePluginVersion(manifest.Version)
+	if err != nil {
+		return NewPluginValidationError(0, err)
+	}
+
 	// Check minimum system version if set
 	if dl.minSystemVersion != nil && manifest.Requirements != nil && manifest.Requirements.MinGoVersion != "" {
 		pluginMinVersion, err := ParsePluginVersion(manifest.Requirements.MinGoVersion)
@@ -500,11 +513,6 @@ func (dl *DynamicLoader[Req, Resp]) validateVersionCompatibility(manifest *Plugi
 
 	// Check plugin-specific compatibility rules
 	if constraint, exists := dl.compatibilityRules[manifest.Name]; exists {
-		pluginVersion, err := ParsePluginVersion(manifest.Version)
-		if err != nil {
-			return NewPluginValidationError(0, err)
-		}
-
 		if !pluginVersion.SatisfiesConstraint(constraint) {
 			return NewPluginValidationError(0, nil)
 		}
@@ -523,11 +531,16 @@ func (dl *DynamicLoader[Req, Resp]) updateDependencyGraph(manifest *PluginManife
 	return dl.dependencyGraph.AddPlugin(manifest.Name, dependencies)
 }
 
-// resolveDependencies resolves and loads plugin dependencies.
-func (dl *DynamicLoader[Req, Resp]) resolveDependencies(ctx context.Context, pluginName string) error {
+// resolveDependenciesWithPath resolves dependencies while tracking the loading path to detect circular dependencies.
+func (dl *DynamicLoader[Req, Resp]) resolveDependenciesWithPath(ctx context.Context, pluginName string, loadingPath map[string]bool) error {
 	dependencies := dl.dependencyGraph.GetDependencies(pluginName)
 
 	for _, dep := range dependencies {
+		// Check for circular dependency
+		if loadingPath[dep] {
+			return NewPluginExecutionFailedError(dep, fmt.Errorf("circular dependency detected: %s -> %s", pluginName, dep))
+		}
+
 		// Check if dependency is already loaded
 		dl.loadingMutex.RLock()
 		state, exists := dl.loadingStates[dep]
@@ -537,8 +550,20 @@ func (dl *DynamicLoader[Req, Resp]) resolveDependencies(ctx context.Context, plu
 			continue // Dependency already loaded
 		}
 
-		// Load dependency recursively
-		if err := dl.LoadDiscoveredPlugin(ctx, dep); err != nil {
+		// Check if dependency is currently being loaded (circular dependency)
+		if exists && state == LoadingStateLoading {
+			return NewPluginExecutionFailedError(dep, fmt.Errorf("circular dependency detected: %s is already being loaded", dep))
+		}
+
+		// Add current dependency to loading path for circular detection
+		newPath := make(map[string]bool)
+		for k, v := range loadingPath {
+			newPath[k] = v
+		}
+		newPath[pluginName] = true
+
+		// Load dependency recursively with updated path
+		if err := dl.loadDiscoveredPluginInternal(ctx, dep, newPath); err != nil {
 			return NewPluginExecutionFailedError(dep, err)
 		}
 	}
@@ -572,6 +597,7 @@ func (dl *DynamicLoader[Req, Resp]) loadPlugin(ctx context.Context, result *Disc
 		Type:      string(result.Manifest.Transport), // Convert transport to type
 		Transport: result.Manifest.Transport,
 		Endpoint:  result.Manifest.Endpoint,
+		Version:   result.Manifest.Version, // Add version from manifest
 	}
 
 	// Add auth if present
@@ -641,9 +667,23 @@ func (dl *DynamicLoader[Req, Resp]) getPluginFactory(transport TransportType) (P
 	// Create appropriate factory based on transport type
 	switch transport {
 	case TransportGRPC, TransportGRPCTLS:
-		// For gRPC transports, we need to check if Req/Resp implement protobuf messages
-		// If not implemented as protobuf messages, fall back to subprocess transport
-		return NewSubprocessPluginFactory[Req, Resp](dl.logger), nil
+		// Check if Req/Resp implement ProtobufMessage interface
+		var req Req
+		var resp Resp
+
+		// Use type assertion to check if they implement ProtobufMessage
+		if _, reqOk := any(req).(ProtobufMessage); reqOk {
+			if _, respOk := any(resp).(ProtobufMessage); respOk {
+				// Both implement ProtobufMessage, use native GRPC factory
+				if grpcFactory, ok := any(NewGRPCPluginFactory[ProtobufMessage, ProtobufMessage](dl.logger)).(PluginFactory[Req, Resp]); ok {
+					return grpcFactory, nil
+				}
+			}
+		}
+
+		// ERROR: GRPC transport requested but types don't implement ProtobufMessage
+		return nil, NewPluginValidationError(0,
+			fmt.Errorf("GRPC transport requires request and response types to implement ProtobufMessage interface"))
 	case TransportExecutable:
 		// Standard subprocess plugin factory
 		return NewSubprocessPluginFactory[Req, Resp](dl.logger), nil
@@ -725,29 +765,103 @@ func (dl *DynamicLoader[Req, Resp]) emitEvent(event DynamicLoaderEvent) {
 }
 
 // ParsePluginVersion parses a semantic version string.
+// validateBuildMetadata validates build metadata component
+func validateBuildMetadata(buildPart string) error {
+	if buildPart == "" {
+		return NewPluginValidationError(0, nil)
+	}
+	if strings.Contains(buildPart, "+") {
+		return NewPluginValidationError(0, nil)
+	}
+	if len(buildPart) > 100 {
+		return NewPluginValidationError(0, nil)
+	}
+	return nil
+}
+
+// validatePrerelease validates prerelease component
+func validatePrerelease(prereleasePart string) error {
+	if prereleasePart == "" {
+		return NewPluginValidationError(0, nil)
+	}
+	if strings.Contains(prereleasePart, "--") {
+		return NewPluginValidationError(0, nil)
+	}
+	if len(prereleasePart) > 100 {
+		return NewPluginValidationError(0, nil)
+	}
+	return nil
+}
+
+// parseVersionComponents splits version string into main version, prerelease, and build
+func parseVersionComponents(versionStr string) (string, string, string, error) {
+	var mainVersion, prerelease, build string
+
+	// Handle build metadata first (+ separator)
+	if buildIdx := strings.Index(versionStr, "+"); buildIdx >= 0 {
+		mainVersion = versionStr[:buildIdx]
+		buildPart := versionStr[buildIdx+1:]
+
+		if err := validateBuildMetadata(buildPart); err != nil {
+			return "", "", "", err
+		}
+		build = buildPart
+	} else {
+		mainVersion = versionStr
+	}
+
+	// Handle prerelease (- separator)
+	if prereleaseIdx := strings.Index(mainVersion, "-"); prereleaseIdx >= 0 {
+		prereleasePart := mainVersion[prereleaseIdx+1:]
+		mainVersion = mainVersion[:prereleaseIdx]
+
+		if err := validatePrerelease(prereleasePart); err != nil {
+			return "", "", "", err
+		}
+		prerelease = prereleasePart
+	}
+
+	return mainVersion, prerelease, build, nil
+}
+
+// parseMainVersionNumbers parses x.y.z version numbers
+func parseMainVersionNumbers(mainVersion string) (uint64, uint64, uint64, error) {
+	parts := strings.Split(mainVersion, ".")
+	if len(parts) != 3 {
+		return 0, 0, 0, NewPluginValidationError(0, nil)
+	}
+
+	major, err := parseVersionComponent(parts[0], "major")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	minor, err := parseVersionComponent(parts[1], "minor")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	patch, err := parseVersionComponent(parts[2], "patch")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	return major, minor, patch, nil
+}
+
 func ParsePluginVersion(versionStr string) (*PluginVersion, error) {
 	if versionStr == "" {
 		return nil, NewPluginValidationError(0, nil)
 	}
 
-	// Simple semver parser - handles basic x.y.z format
-	parts := strings.Split(versionStr, ".")
-	if len(parts) < 3 {
-		return nil, NewPluginValidationError(0, nil)
-	}
-
-	major, err := parseVersionComponent(parts[0], "major")
+	// Parse version components
+	mainVersion, prerelease, build, err := parseVersionComponents(versionStr)
 	if err != nil {
 		return nil, err
 	}
 
-	minor, err := parseVersionComponent(parts[1], "minor")
-	if err != nil {
-		return nil, err
-	}
-
-	// Handle patch version with possible prerelease/build metadata
-	patch, prerelease, build, err := parsePatchVersion(parts[2])
+	// Parse main version numbers
+	major, minor, patch, err := parseMainVersionNumbers(mainVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -764,6 +878,35 @@ func ParsePluginVersion(versionStr string) (*PluginVersion, error) {
 
 // parseVersionComponent parses a single version component (major, minor, patch)
 func parseVersionComponent(component, componentType string) (uint64, error) {
+	// Validate component format
+	if component == "" {
+		structuredErr := errors.New(ErrCodeInvalidPluginName, "Empty version component").
+			WithContext("component_type", componentType).
+			WithSeverity("error")
+		return 0, NewPluginValidationError(0, structuredErr)
+	}
+
+	// Check for leading zeros (not allowed in semver except for "0")
+	if len(component) > 1 && component[0] == '0' {
+		structuredErr := errors.New(ErrCodeInvalidPluginName, "Leading zeros not allowed in version components").
+			WithContext("component_type", componentType).
+			WithContext("component_value", component).
+			WithSeverity("error")
+		return 0, NewPluginValidationError(0, structuredErr)
+	}
+
+	// Check for invalid characters (must be digits only)
+	for _, char := range component {
+		if char < '0' || char > '9' {
+			structuredErr := errors.New(ErrCodeInvalidPluginName, "Invalid character in version component").
+				WithContext("component_type", componentType).
+				WithContext("component_value", component).
+				WithContext("invalid_char", string(char)).
+				WithSeverity("error")
+			return 0, NewPluginValidationError(0, structuredErr)
+		}
+	}
+
 	value, err := strconv.ParseUint(component, 10, 64)
 	if err != nil {
 		structuredErr := errors.Wrap(err, ErrCodeInvalidPluginName, "Invalid version component").
@@ -773,57 +916,6 @@ func parseVersionComponent(component, componentType string) (uint64, error) {
 		return 0, NewPluginValidationError(0, structuredErr)
 	}
 	return value, nil
-}
-
-// parsePatchVersion parses patch version with possible prerelease/build metadata
-func parsePatchVersion(patchPart string) (uint64, string, string, error) {
-	var patch uint64
-	var prerelease, build string
-	var err error
-
-	if idx := strings.Index(patchPart, "-"); idx >= 0 {
-		patch, prerelease, build, err = parsePatchWithPrerelease(patchPart, idx)
-	} else if idx := strings.Index(patchPart, "+"); idx >= 0 {
-		patch, build, err = parsePatchWithBuild(patchPart, idx)
-	} else {
-		patch, err = parseVersionComponent(patchPart, "patch")
-	}
-
-	if err != nil {
-		return 0, "", "", err
-	}
-	return patch, prerelease, build, nil
-}
-
-// parsePatchWithPrerelease parses patch version with prerelease identifier
-func parsePatchWithPrerelease(patchPart string, idx int) (uint64, string, string, error) {
-	patch, err := parseVersionComponent(patchPart[:idx], "patch")
-	if err != nil {
-		return 0, "", "", err
-	}
-
-	remaining := patchPart[idx+1:]
-	var prerelease, build string
-
-	if buildIdx := strings.Index(remaining, "+"); buildIdx >= 0 {
-		prerelease = remaining[:buildIdx]
-		build = remaining[buildIdx+1:]
-	} else {
-		prerelease = remaining
-	}
-
-	return patch, prerelease, build, nil
-}
-
-// parsePatchWithBuild parses patch version with build metadata
-func parsePatchWithBuild(patchPart string, idx int) (uint64, string, error) {
-	patch, err := parseVersionComponent(patchPart[:idx], "patch")
-	if err != nil {
-		return 0, "", err
-	}
-
-	build := patchPart[idx+1:]
-	return patch, build, nil
 }
 
 // Compare compares two plugin versions. Returns -1, 0, or 1.
@@ -904,6 +996,17 @@ func (pv *PluginVersion) satisfiesCaretConstraint(constraint string) bool {
 		return false
 	}
 
+	// BUG FIX: Prerelease versions should not satisfy stable constraints
+	// If constraint target is stable (no prerelease) but our version has prerelease,
+	// we need stricter checking according to semver rules
+	if target.Prerelease == "" && pv.Prerelease != "" {
+		// For prerelease versions, they can only satisfy if they're higher in major.minor.patch
+		// A prerelease 1.0.0-alpha should NOT satisfy ^1.0.0
+		return pv.Major == target.Major &&
+			(pv.Minor > target.Minor ||
+				(pv.Minor == target.Minor && pv.Patch > target.Patch))
+	}
+
 	return pv.Major == target.Major &&
 		(pv.Minor > target.Minor ||
 			(pv.Minor == target.Minor && pv.Patch >= target.Patch))
@@ -915,6 +1018,17 @@ func (pv *PluginVersion) satisfiesTildeConstraint(constraint string) bool {
 	target, err := ParsePluginVersion(targetStr)
 	if err != nil {
 		return false
+	}
+
+	// BUG FIX: Prerelease versions should not satisfy stable constraints
+	// If constraint target is stable (no prerelease) but our version has prerelease,
+	// we need stricter checking according to semver rules
+	if target.Prerelease == "" && pv.Prerelease != "" {
+		// For prerelease versions with tilde, they can only satisfy if patch is higher
+		// A prerelease 1.2.0-alpha should NOT satisfy ~1.2.0
+		return pv.Major == target.Major &&
+			pv.Minor == target.Minor &&
+			pv.Patch > target.Patch
 	}
 
 	return pv.Major == target.Major &&
@@ -930,19 +1044,65 @@ func NewDependencyGraph() *DependencyGraph {
 	}
 }
 
+// cleanupOldDependencies removes plugin from old dependencies' dependents lists
+func (dg *DependencyGraph) cleanupOldDependencies(name string, node *DependencyNode) {
+	for _, oldDep := range node.Dependencies {
+		if depNode, depExists := dg.nodes[oldDep]; depExists {
+			for i, dependent := range depNode.Dependents {
+				if dependent == name {
+					depNode.Dependents = append(depNode.Dependents[:i], depNode.Dependents[i+1:]...)
+					break
+				}
+			}
+		}
+	}
+}
+
+// createOrUpdateNode creates a new dependency node or returns existing one
+func (dg *DependencyGraph) createOrUpdateNode(name string) *DependencyNode {
+	if node, exists := dg.nodes[name]; exists {
+		return node
+	}
+
+	node := &DependencyNode{
+		Name:         name,
+		Dependencies: make([]string, 0),
+		Dependents:   make([]string, 0),
+		Status:       "pending",
+	}
+	dg.nodes[name] = node
+	return node
+}
+
+// updateDependentRelationships updates dependent relationships for all dependencies
+func (dg *DependencyGraph) updateDependentRelationships(name string, dependencies []string) {
+	for _, dep := range dependencies {
+		depNode := dg.createOrUpdateNode(dep)
+
+		// Add to dependents list if not already present
+		found := false
+		for _, existing := range depNode.Dependents {
+			if existing == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			depNode.Dependents = append(depNode.Dependents, name)
+		}
+	}
+}
+
 // AddPlugin adds a plugin to the dependency graph.
 func (dg *DependencyGraph) AddPlugin(name string, dependencies []string) error {
 	dg.mu.Lock()
 	defer dg.mu.Unlock()
 
-	// Create node if it doesn't exist
-	if _, exists := dg.nodes[name]; !exists {
-		dg.nodes[name] = &DependencyNode{
-			Name:         name,
-			Dependencies: make([]string, 0),
-			Dependents:   make([]string, 0),
-			Status:       "pending",
-		}
+	// Handle existing or new node
+	if node, exists := dg.nodes[name]; exists {
+		dg.cleanupOldDependencies(name, node)
+	} else {
+		dg.createOrUpdateNode(name)
 	}
 
 	// Update dependencies
@@ -950,28 +1110,7 @@ func (dg *DependencyGraph) AddPlugin(name string, dependencies []string) error {
 	dg.edges[name] = dependencies
 
 	// Update dependent relationships
-	for _, dep := range dependencies {
-		if _, exists := dg.nodes[dep]; !exists {
-			dg.nodes[dep] = &DependencyNode{
-				Name:         dep,
-				Dependencies: make([]string, 0),
-				Dependents:   make([]string, 0),
-				Status:       "pending",
-			}
-		}
-
-		// Add to dependents list
-		found := false
-		for _, existing := range dg.nodes[dep].Dependents {
-			if existing == name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			dg.nodes[dep].Dependents = append(dg.nodes[dep].Dependents, name)
-		}
-	}
+	dg.updateDependentRelationships(name, dependencies)
 
 	dg.validated = false
 	return nil
@@ -1066,6 +1205,15 @@ func (dg *DependencyGraph) CalculateLoadOrder() ([]string, error) {
 	dg.mu.Lock()
 	defer dg.mu.Unlock()
 
+	// First check for missing dependencies
+	for _, node := range dg.nodes {
+		for _, dep := range node.Dependencies {
+			if _, exists := dg.nodes[dep]; !exists {
+				return nil, NewPluginValidationError(0, nil)
+			}
+		}
+	}
+
 	// Topological sort using Kahn's algorithm
 	inDegree := dg.calculateInDegrees()
 	queue := dg.findRootNodes(inDegree)
@@ -1153,7 +1301,43 @@ func (dg *DependencyGraph) ValidateDependencies() error {
 		}
 	}
 
-	// Calculate load order to check for cycles
-	_, err := dg.CalculateLoadOrder()
-	return err
+	// Check for circular dependencies using DFS
+	// (without calling CalculateLoadOrder to avoid deadlock)
+	visited := make(map[string]bool)
+	recursionStack := make(map[string]bool)
+
+	for nodeName := range dg.nodes {
+		if !visited[nodeName] {
+			if dg.hasCycleDFS(nodeName, visited, recursionStack) {
+				return NewPluginValidationError(0, nil)
+			}
+		}
+	}
+
+	return nil
+}
+
+// hasCycleDFS performs depth-first search to detect cycles
+func (dg *DependencyGraph) hasCycleDFS(nodeName string, visited, recursionStack map[string]bool) bool {
+	visited[nodeName] = true
+	recursionStack[nodeName] = true
+
+	// Visit all dependencies of current node
+	if dependencies, exists := dg.edges[nodeName]; exists {
+		for _, dep := range dependencies {
+			// If dependency not visited, recurse
+			if !visited[dep] {
+				if dg.hasCycleDFS(dep, visited, recursionStack) {
+					return true
+				}
+			} else if recursionStack[dep] {
+				// If dependency is in current recursion stack, we found a cycle
+				return true
+			}
+		}
+	}
+
+	// Remove from recursion stack before returning
+	recursionStack[nodeName] = false
+	return false
 }

@@ -119,39 +119,65 @@ func (cv *ConfigValidator[Req, Resp]) ValidateLibraryConfig(config LibraryConfig
 //
 // Cyclomatic Complexity: 1 (no conditional branches - sequential validation)
 func (cv *ConfigValidator[Req, Resp]) validateFieldConstraints(config LibraryConfig) error {
-	// Logging Level Validation: Must be valid log level for proper log filtering
-	if config.Logging.Level != "" {
-		validLevels := []string{"debug", "info", "warn", "error"}
-		levelValid := false
-		for _, level := range validLevels {
-			if config.Logging.Level == level {
-				levelValid = true
-				break
-			}
+	// Validate logging configuration
+	if err := cv.validateLoggingConstraints(config.Logging); err != nil {
+		return err
+	}
+
+	// Validate observability configuration
+	if err := cv.validateObservabilityConstraints(config.Observability); err != nil {
+		return err
+	}
+
+	// Validate performance configuration
+	if err := cv.validatePerformanceConstraints(config.Performance); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateLoggingConstraints validates logging-specific field constraints
+func (cv *ConfigValidator[Req, Resp]) validateLoggingConstraints(logging LoggingConfig) error {
+	if logging.Level == "" {
+		return nil
+	}
+
+	validLevels := []string{"debug", "info", "warn", "error"}
+	for _, level := range validLevels {
+		if logging.Level == level {
+			return nil
 		}
-		if !levelValid {
-			return fmt.Errorf("invalid log level: %s (must be one of: debug, info, warn, error)", config.Logging.Level)
-		}
 	}
 
-	// Observability Tracing Sample Rate: Must be 0.0-1.0 for valid probability
-	if config.Observability.TracingSampleRate < 0.0 || config.Observability.TracingSampleRate > 1.0 {
-		return fmt.Errorf("invalid tracing sample rate: %f (must be between 0.0 and 1.0)", config.Observability.TracingSampleRate)
+	return fmt.Errorf("invalid log level: %s (must be one of: debug, info, warn, error)", logging.Level)
+}
+
+// validateObservabilityConstraints validates observability-specific field constraints
+func (cv *ConfigValidator[Req, Resp]) validateObservabilityConstraints(obs ObservabilityRuntimeConfig) error {
+	// Tracing Sample Rate: Must be 0.0-1.0 for valid probability
+	if obs.TracingSampleRate < 0.0 || obs.TracingSampleRate > 1.0 {
+		return fmt.Errorf("invalid tracing sample rate: %f (must be between 0.0 and 1.0)", obs.TracingSampleRate)
 	}
 
-	// Observability Metrics Interval: Must be >= 1 second for reasonable collection
-	if config.Observability.MetricsInterval < time.Second {
-		return fmt.Errorf("metrics interval too short: %v (minimum 1 second)", config.Observability.MetricsInterval)
+	// Metrics Interval: Must be >= 1 second for reasonable collection
+	if obs.MetricsInterval < time.Second {
+		return fmt.Errorf("metrics interval too short: %v (minimum 1 second)", obs.MetricsInterval)
 	}
 
-	// Performance Watcher Poll Interval: Must be >= 1 second to prevent CPU abuse
-	if config.Performance.WatcherPollInterval < time.Second {
-		return fmt.Errorf("watcher poll interval too short: %v (minimum 1 second)", config.Performance.WatcherPollInterval)
+	return nil
+}
+
+// validatePerformanceConstraints validates performance-specific field constraints
+func (cv *ConfigValidator[Req, Resp]) validatePerformanceConstraints(perf PerformanceConfig) error {
+	// Watcher Poll Interval: Must be >= 1 second to prevent CPU abuse
+	if perf.WatcherPollInterval < time.Second {
+		return fmt.Errorf("watcher poll interval too short: %v (minimum 1 second)", perf.WatcherPollInterval)
 	}
 
-	// Performance Max Concurrent Health Checks: Must be >= 1 for basic monitoring
-	if config.Performance.MaxConcurrentHealthChecks < 1 {
-		return fmt.Errorf("max concurrent health checks must be at least 1, got: %d", config.Performance.MaxConcurrentHealthChecks)
+	// Max Concurrent Health Checks: Must be >= 1 for basic monitoring
+	if perf.MaxConcurrentHealthChecks < 1 {
+		return fmt.Errorf("max concurrent health checks must be at least 1, got: %d", perf.MaxConcurrentHealthChecks)
 	}
 
 	return nil

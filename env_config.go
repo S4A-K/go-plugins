@@ -217,31 +217,95 @@ func expandSingleEnvironmentVariable(varName, inlineDefault string, options EnvC
 //   - Length limits (prevents buffer overflow attacks)
 //   - Pattern validation (ensures expected format)
 //   - Encoding validation (prevents encoding-based attacks)
+//
+// validateAndSanitizeValue performs comprehensive security validation on environment variable values.
+//
+// This function applies multiple security checks to prevent common attack vectors
+// and configuration errors. The validation can be disabled via options for
+// performance-critical scenarios where input is already trusted.
+//
+// Security validations performed:
+//   - Null byte injection prevention
+//   - Length limits for memory safety
+//   - Control character filtering for safe processing
+//
+// The function is designed for extensibility - new security checks can be
+// easily added as separate validation functions and integrated into the pipeline.
+//
+// Returns the validated value unchanged, or an error if validation fails.
 func validateAndSanitizeValue(value string, options EnvConfigOptions) (string, error) {
 	if !options.ValidateValues {
 		return value, nil // Skip validation if disabled
 	}
 
-	// Check for null bytes (security risk)
+	// Apply security validations in sequence
+	if err := validateNullBytesSafety(value); err != nil {
+		return "", err
+	}
+
+	if err := validateLengthLimits(value); err != nil {
+		return "", err
+	}
+
+	if err := validateControlCharacters(value); err != nil {
+		return "", err
+	}
+
+	// Value passes all security validations
+	return value, nil
+}
+
+// validateNullBytesSafety checks for null byte injection attacks.
+//
+// Null bytes in environment variable values can be exploited to bypass
+// security checks in some contexts, particularly in C-based programs
+// that treat null bytes as string terminators.
+//
+// This check prevents such injection attacks by rejecting any value
+// containing null bytes.
+func validateNullBytesSafety(value string) error {
 	if strings.Contains(value, "\x00") {
-		return "", NewConfigValidationError("environment variable value contains null byte", nil)
+		return NewConfigValidationError("environment variable value contains null byte", nil)
 	}
+	return nil
+}
 
-	// Check for reasonable length (prevent memory exhaustion)
-	maxLength := 4096 // Reasonable limit for configuration values
+// validateLengthLimits enforces reasonable length constraints.
+//
+// Excessively long environment variable values can cause memory exhaustion
+// or denial of service conditions. This validation enforces a reasonable
+// maximum length to prevent such issues.
+//
+// The limit of 4KB is chosen as a balance between functionality and safety,
+// allowing for typical configuration values while preventing abuse.
+func validateLengthLimits(value string) error {
+	const maxLength = 4096 // Reasonable limit for configuration values
 	if len(value) > maxLength {
-		return "", NewConfigValidationError(fmt.Sprintf("environment variable value too long: %d bytes (max %d)", len(value), maxLength), nil)
+		return NewConfigValidationError(fmt.Sprintf("environment variable value too long: %d bytes (max %d)", len(value), maxLength), nil)
 	}
+	return nil
+}
 
-	// Check for dangerous control characters (basic protection)
+// validateControlCharacters filters dangerous control characters.
+//
+// Control characters (ASCII 0-31 except tab, newline, carriage return) can
+// cause issues in terminal output, logging systems, and configuration parsers.
+// This validation prevents such characters while allowing legitimate whitespace.
+//
+// Allowed control characters:
+//   - Tab (0x09): Common in configuration formatting
+//   - Newline (0x0A): Standard line terminator
+//   - Carriage Return (0x0D): Windows-style line endings
+//
+// All other control characters are rejected with position information
+// for easier debugging.
+func validateControlCharacters(value string) error {
 	for i, r := range value {
 		if r < 32 && r != '\t' && r != '\n' && r != '\r' {
-			return "", NewConfigValidationError(fmt.Sprintf("environment variable contains control character at position %d", i), nil)
+			return NewConfigValidationError(fmt.Sprintf("environment variable contains control character at position %d", i), nil)
 		}
 	}
-
-	// Value passes validation
-	return value, nil
+	return nil
 }
 
 // ProcessConfigurationWithEnv processes a configuration structure with environment expansion.

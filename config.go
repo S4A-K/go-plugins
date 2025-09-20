@@ -307,6 +307,7 @@ type RateLimitConfig struct {
 type PluginConfig struct {
 	// Basic plugin information
 	Name      string        `json:"name" yaml:"name"`
+	Version   string        `json:"version" yaml:"version"`
 	Type      string        `json:"type" yaml:"type"`
 	Transport TransportType `json:"transport" yaml:"transport"`
 	Endpoint  string        `json:"endpoint" yaml:"endpoint"`
@@ -478,6 +479,12 @@ func (pc *PluginConfig) validateNetworkTransport() error {
 
 // validateTransportConfig validates transport-specific configuration
 func (pc *PluginConfig) validateTransportConfig() error {
+	return pc.validateTransportConfigWithContext(nil)
+}
+
+// validateTransportConfigWithContext validates transport-specific configuration
+// with optional context about supported custom transports
+func (pc *PluginConfig) validateTransportConfigWithContext(customTransports map[string]bool) error {
 	switch pc.Transport {
 	case TransportGRPC, TransportGRPCTLS:
 		return pc.validateNetworkTransport()
@@ -486,6 +493,11 @@ func (pc *PluginConfig) validateTransportConfig() error {
 			return NewMissingExecutableError()
 		}
 	default:
+		// Check if this is a known custom transport
+		if customTransports != nil && customTransports[string(pc.Transport)] {
+			// Custom transport - minimal validation (delegate to custom factory)
+			return nil
+		}
 		return NewUnsupportedTransportError(pc.Transport)
 	}
 	return nil

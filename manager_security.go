@@ -33,8 +33,11 @@ func (m *Manager[Req, Resp]) EnablePluginSecurity(config SecurityConfig) error {
 		}
 	}
 
-	if err := m.securityValidator.Enable(); err != nil {
-		return NewSecurityValidationError("failed to enable security validator", err)
+	// Only call Enable if not already enabled (avoid "already enabled" error)
+	if !m.securityValidator.IsEnabled() {
+		if err := m.securityValidator.Enable(); err != nil {
+			return NewSecurityValidationError("failed to enable security validator", err)
+		}
 	}
 
 	m.logger.Info("Plugin security enabled", "policy", config.Policy.String())
@@ -72,6 +75,10 @@ func (m *Manager[Req, Resp]) IsPluginSecurityEnabled() bool {
 
 // GetPluginSecurityStats returns current security validation statistics
 func (m *Manager[Req, Resp]) GetPluginSecurityStats() (SecurityStats, error) {
+	if m.shutdown.Load() {
+		return SecurityStats{}, errors.New("manager is shut down")
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -79,16 +86,28 @@ func (m *Manager[Req, Resp]) GetPluginSecurityStats() (SecurityStats, error) {
 		return SecurityStats{}, errors.New("security validator not initialized")
 	}
 
+	if !m.securityValidator.IsEnabled() {
+		return SecurityStats{}, errors.New("security is disabled")
+	}
+
 	return m.securityValidator.GetStats(), nil
 }
 
 // GetPluginSecurityConfig returns the current security configuration
 func (m *Manager[Req, Resp]) GetPluginSecurityConfig() (SecurityConfig, error) {
+	if m.shutdown.Load() {
+		return SecurityConfig{}, errors.New("manager is shut down")
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	if m.securityValidator == nil {
 		return SecurityConfig{}, errors.New("security validator not initialized")
+	}
+
+	if !m.securityValidator.IsEnabled() {
+		return SecurityConfig{}, errors.New("security is disabled")
 	}
 
 	return m.securityValidator.GetConfig(), nil

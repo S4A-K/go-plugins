@@ -25,9 +25,15 @@ func TestLoadSecurityConfigFromEnv(t *testing.T) {
 	}
 
 	defer func() {
-		_ = os.Unsetenv("GOPLUGINS_SECURITY_ENABLED")
-		_ = os.Unsetenv("GOPLUGINS_SECURITY_POLICY")
-		_ = os.Unsetenv("GOPLUGINS_WHITELIST_FILE")
+		if err := os.Unsetenv("GOPLUGINS_SECURITY_ENABLED"); err != nil {
+			t.Logf("Warning: Failed to unset GOPLUGINS_SECURITY_ENABLED: %v", err)
+		}
+		if err := os.Unsetenv("GOPLUGINS_SECURITY_POLICY"); err != nil {
+			t.Logf("Warning: Failed to unset GOPLUGINS_SECURITY_POLICY: %v", err)
+		}
+		if err := os.Unsetenv("GOPLUGINS_WHITELIST_FILE"); err != nil {
+			t.Logf("Warning: Failed to unset GOPLUGINS_WHITELIST_FILE: %v", err)
+		}
 	}()
 
 	// Test loading from environment

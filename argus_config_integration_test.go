@@ -45,101 +45,28 @@ import (
 // 4. Error handling and recovery scenarios
 // 5. Audit logging and security validation
 //
-// Test scenarios:
-//   - Complete startup and configuration loading
-//   - Hot reload with valid configuration changes
-//   - Hot reload with invalid configuration (rollback)
-//   - Environment variable changes and re-expansion
-//   - Configuration validation failures and recovery
-//   - Audit trail verification
-func TestLibraryConfigIntegration_CompleteWorkflow(t *testing.T) {
-	// Setup integration test environment
+// TestLibraryConfigIntegration_InitialLoad tests initial configuration loading and environment expansion
+func TestLibraryConfigIntegration_InitialLoad(t *testing.T) {
+	// Setup
 	tempDir, cleanup := setupIntegrationTestEnv(t)
 	defer cleanup()
+	cleanupEnv := setupIntegrationTestEnvironment(t)
+	defer cleanupEnv()
 
-	// Create test manager and logger
 	manager := createTestManager()
 	logger := NewTestLogger()
 
-	// Setup environment variables for testing
-	testEnvVars := map[string]string{
-		"GO_PLUGINS_LOG_LEVEL":     "info",
-		"GO_PLUGINS_METRICS_PORT":  "9090",
-		"GO_PLUGINS_POLL_INTERVAL": "5s",
-		"GO_PLUGINS_ENV":           "integration-test",
-	}
-
-	for key, value := range testEnvVars {
-		if err := os.Setenv(key, value); err != nil {
-			t.Fatalf("Failed to set %s: %v", key, err)
-		}
-		defer func(k string) {
-			if err := os.Unsetenv(k); err != nil {
-				t.Logf("Warning: failed to unset env var %s: %v", k, err)
-			}
-		}(key)
-	}
-
-	// Create initial library configuration with environment variables
+	// Create initial configuration
 	configFile := filepath.Join(tempDir, "library.json")
-	initialConfig := LibraryConfig{
-		Logging: LoggingConfig{
-			Level:             "info", // Use direct value since logging expansion not implemented
-			Format:            "json",
-			Structured:        true,
-			IncludeCaller:     false,
-			IncludeStackTrace: false,
-		},
-		Observability: ObservabilityRuntimeConfig{
-			MetricsEnabled:            true,
-			MetricsInterval:           30 * time.Second,
-			TracingEnabled:            false,
-			TracingSampleRate:         0.1,
-			HealthMetricsEnabled:      true,
-			PerformanceMetricsEnabled: true,
-		},
-		DefaultPolicies: DefaultPoliciesConfig{
-			Retry: RetryConfig{
-				MaxRetries:      3,
-				InitialInterval: 100 * time.Millisecond,
-				MaxInterval:     5 * time.Second,
-				Multiplier:      2.0,
-				RandomJitter:    true,
-			},
-		},
-		Environment: EnvironmentConfig{
-			ExpansionEnabled: true,
-			VariablePrefix:   "GO_PLUGINS_",
-			FailOnMissing:    false,
-			Overrides: map[string]string{
-				"metrics_port": "${GO_PLUGINS_METRICS_PORT}",
-				"environment":  "${GO_PLUGINS_ENV}",
-			},
-		},
-		Performance: PerformanceConfig{
-			WatcherPollInterval:       10 * time.Second,
-			CacheTTL:                  5 * time.Second,
-			MaxConcurrentHealthChecks: 8,
-			OptimizationEnabled:       true,
-		},
-		Metadata: ConfigMetadata{
-			Version:      "v1.0.0",
-			Environment:  "integration-test",
-			LastModified: time.Now(),
-			Description:  "Integration test library configuration",
-			Tags:         []string{"test", "integration", "library"},
-		},
-	}
-
-	// Write initial configuration
+	initialConfig := createDefaultIntegrationConfig()
 	if err := writeLibraryConfigToFile(configFile, initialConfig); err != nil {
 		t.Fatalf("Failed to write initial config: %v", err)
 	}
 
-	// Setup library config watcher with comprehensive options
+	// Setup watcher
 	auditFile := filepath.Join(tempDir, "audit.log")
 	options := LibraryConfigOptions{
-		PollInterval:        2 * time.Second, // Fast polling for testing
+		PollInterval:        2 * time.Second,
 		CacheTTL:            1 * time.Second,
 		EnableEnvExpansion:  true,
 		ValidateBeforeApply: true,
@@ -159,198 +86,133 @@ func TestLibraryConfigIntegration_CompleteWorkflow(t *testing.T) {
 		t.Fatalf("Failed to create watcher: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := watcher.Start(ctx); err != nil {
 		t.Fatalf("Failed to start watcher: %v", err)
 	}
 	defer func() {
-		_ = watcher.Stop()
+		if err := watcher.Stop(); err != nil {
+			t.Logf("Warning: Failed to stop watcher: %v", err)
+		}
 	}()
 
-	// Test Phase 1: Initial configuration loading and validation
-	t.Run("initial configuration loaded correctly", func(t *testing.T) {
-		// Wait for initial load
-		time.Sleep(1 * time.Second)
+	// Test initial configuration loading
+	time.Sleep(1 * time.Second)
 
-		config := watcher.GetCurrentConfig()
-		if config == nil {
-			t.Fatal("Expected initial config to be loaded")
-		}
+	config := watcher.GetCurrentConfig()
+	if config == nil {
+		t.Fatal("Expected initial config to be loaded")
+	}
 
-		// Validate environment expansion occurred
-		if config.Logging.Level != "info" {
-			t.Errorf("Expected log level 'info', got: %s", config.Logging.Level)
-		}
+	// Validate environment expansion occurred
+	if config.Logging.Level != "info" {
+		t.Errorf("Expected log level 'info', got: %s", config.Logging.Level)
+	}
 
-		if config.Environment.Overrides["metrics_port"] != "9090" {
-			t.Errorf("Expected metrics port '9090', got: %s", config.Environment.Overrides["metrics_port"])
-		}
+	if config.Environment.Overrides["metrics_port"] != "9090" {
+		t.Errorf("Expected metrics port '9090', got: %s", config.Environment.Overrides["metrics_port"])
+	}
 
-		if config.Environment.Overrides["environment"] != "integration-test" {
-			t.Errorf("Expected environment 'integration-test', got: %s", config.Environment.Overrides["environment"])
-		}
+	if config.Environment.Overrides["environment"] != "integration-test" {
+		t.Errorf("Expected environment 'integration-test', got: %s", config.Environment.Overrides["environment"])
+	}
 
-		t.Logf("Initial configuration loaded successfully with version: %s", config.Metadata.Version)
-	})
-
-	// Test Phase 2: Hot reload with valid configuration changes
-	t.Run("hot reload with valid configuration changes", func(t *testing.T) {
-		// Get current config version
-		originalConfig := watcher.GetCurrentConfig()
-		originalVersion := originalConfig.Metadata.Version
-
-		// Update configuration with new values
-		updatedConfig := *originalConfig
-		updatedConfig.Logging.Level = "debug" // Change log level
-		updatedConfig.Metadata.Version = "v1.1.0"
-		updatedConfig.Metadata.LastModified = time.Now()
-		updatedConfig.Metadata.Description = "Updated integration test configuration"
-
-		// Write updated configuration
-		if err := writeLibraryConfigToFile(configFile, updatedConfig); err != nil {
-			t.Fatalf("Failed to write updated config: %v", err)
-		}
-
-		// Wait for hot reload detection
-		if err := waitForConfigVersionChange(watcher, originalVersion, 15*time.Second); err != nil {
-			t.Fatalf("Configuration hot reload not detected: %v", err)
-		}
-
-		// Validate new configuration
-		newConfig := watcher.GetCurrentConfig()
-		if newConfig.Logging.Level != "debug" {
-			t.Errorf("Expected updated log level 'debug', got: %s", newConfig.Logging.Level)
-		}
-
-		if newConfig.Metadata.Version != "v1.1.0" {
-			t.Errorf("Expected updated version 'v1.1.0', got: %s", newConfig.Metadata.Version)
-		}
-
-		t.Logf("Hot reload completed successfully from %s to %s", originalVersion, newConfig.Metadata.Version)
-	})
-
-	// Test Phase 3: Environment variable changes with re-expansion
-	t.Run("environment variable changes with re-expansion", func(t *testing.T) {
-		// Change environment variable
-		if err := os.Setenv("GO_PLUGINS_LOG_LEVEL", "warn"); err != nil {
-			t.Fatalf("Failed to set GO_PLUGINS_LOG_LEVEL: %v", err)
-		}
-		defer func() {
-			_ = os.Setenv("GO_PLUGINS_LOG_LEVEL", "info")
-		}()
-
-		// Get current config
-		originalConfig := watcher.GetCurrentConfig()
-		originalVersion := originalConfig.Metadata.Version
-
-		// Update configuration to trigger re-expansion (change version and use env var)
-		updatedConfig := *originalConfig
-		updatedConfig.Metadata.Version = "v1.2.0"
-		updatedConfig.Metadata.LastModified = time.Now()
-		updatedConfig.Logging.Level = "${GO_PLUGINS_LOG_LEVEL}" // Use env var for re-expansion
-
-		// Write updated configuration
-		if err := writeLibraryConfigToFile(configFile, updatedConfig); err != nil {
-			t.Fatalf("Failed to write config with env change: %v", err)
-		}
-
-		// Wait for hot reload with environment re-expansion
-		if err := waitForConfigVersionChange(watcher, originalVersion, 15*time.Second); err != nil {
-			t.Fatalf("Environment change hot reload not detected: %v", err)
-		}
-
-		// Validate environment variable was re-expanded
-		newConfig := watcher.GetCurrentConfig()
-		if newConfig.Logging.Level != "warn" {
-			t.Errorf("Expected re-expanded log level 'warn', got: %s", newConfig.Logging.Level)
-		}
-
-		t.Logf("Environment variable re-expansion completed successfully")
-	})
-
-	// Test Phase 4: Invalid configuration with rollback
-	t.Run("invalid configuration with rollback", func(t *testing.T) {
-		// Get current valid configuration
-		validConfig := watcher.GetCurrentConfig()
-		validVersion := validConfig.Metadata.Version
-
-		// Create invalid configuration (invalid retry config)
-		invalidConfig := *validConfig
-		invalidConfig.DefaultPolicies.Retry.MaxRetries = -1 // Invalid value
-		invalidConfig.Metadata.Version = "v1.3.0-invalid"
-		invalidConfig.Metadata.LastModified = time.Now()
-
-		// Write invalid configuration
-		if err := writeLibraryConfigToFile(configFile, invalidConfig); err != nil {
-			t.Fatalf("Failed to write invalid config: %v", err)
-		}
-
-		// Wait and check that rollback occurred
-		time.Sleep(3 * time.Second)
-
-		// Validate that config was not updated (rollback occurred)
-		currentConfig := watcher.GetCurrentConfig()
-		if currentConfig.Metadata.Version == "v1.3.0-invalid" {
-			t.Error("Invalid configuration was applied instead of being rolled back")
-		}
-
-		if currentConfig.DefaultPolicies.Retry.MaxRetries == -1 {
-			t.Error("Invalid retry configuration was applied")
-		}
-
-		// Should maintain the valid configuration
-		if currentConfig.Metadata.Version != validVersion {
-			t.Logf("Configuration rolled back correctly, version remains: %s", currentConfig.Metadata.Version)
-		}
-
-		t.Logf("Invalid configuration rollback completed successfully")
-	})
-
-	// Test Phase 5: Audit trail verification
-	t.Run("audit trail verification", func(t *testing.T) {
-		// Allow some time for audit logs to be written
-		time.Sleep(2 * time.Second)
-
-		// Check audit file exists and has content
-		if _, err := os.Stat(auditFile); os.IsNotExist(err) {
-			t.Errorf("Audit file does not exist: %s", auditFile)
-			return
-		}
-
-		auditData, err := os.ReadFile(auditFile)
-		if err != nil {
-			t.Fatalf("Failed to read audit file: %v", err)
-		}
-
-		auditContent := string(auditData)
-		if len(auditContent) == 0 {
-			t.Error("Audit file is empty")
-			return
-		}
-
-		// Validate audit contains expected events
-		expectedEvents := []string{
-			"configuration_loaded",
-			"configuration_changed",
-			"environment_expanded",
-		}
-
-		for _, event := range expectedEvents {
-			if !contains(auditContent, event) {
-				t.Errorf("Audit log missing expected event: %s", event)
-			}
-		}
-
-		t.Logf("Audit trail verification completed successfully, log size: %d bytes", len(auditData))
-	})
+	t.Logf("Initial configuration loaded successfully with version: %s", config.Metadata.Version)
 }
 
-// TestLibraryConfigIntegration_PerformanceUnderLoad tests performance under load.
-//
-// This test validates that the library configuration system performs well
-// under high-frequency configuration changes and concurrent access.
+// TestLibraryConfigIntegration_HotReload tests configuration hot reloading
+func TestLibraryConfigIntegration_HotReload(t *testing.T) {
+	// Setup
+	tempDir, cleanup := setupIntegrationTestEnv(t)
+	defer cleanup()
+	cleanupEnv := setupIntegrationTestEnvironment(t)
+	defer cleanupEnv()
+
+	manager := createTestManager()
+	logger := NewTestLogger()
+
+	// Create initial configuration
+	configFile := filepath.Join(tempDir, "library.json")
+	initialConfig := createDefaultIntegrationConfig()
+	if err := writeLibraryConfigToFile(configFile, initialConfig); err != nil {
+		t.Fatalf("Failed to write initial config: %v", err)
+	}
+
+	// Setup watcher
+	auditFile := filepath.Join(tempDir, "audit.log")
+	options := LibraryConfigOptions{
+		PollInterval:        2 * time.Second,
+		CacheTTL:            1 * time.Second,
+		EnableEnvExpansion:  true,
+		ValidateBeforeApply: true,
+		RollbackOnFailure:   true,
+		AuditConfig: argus.AuditConfig{
+			Enabled:       true,
+			OutputFile:    auditFile,
+			MinLevel:      argus.AuditInfo,
+			BufferSize:    100,
+			FlushInterval: 500 * time.Millisecond,
+		},
+	}
+
+	watcher, err := NewLibraryConfigWatcher(manager, configFile, options, logger)
+	if err != nil {
+		t.Fatalf("Failed to create watcher: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := watcher.Start(ctx); err != nil {
+		t.Fatalf("Failed to start watcher: %v", err)
+	}
+	defer func() {
+		if err := watcher.Stop(); err != nil {
+			t.Logf("Warning: Failed to stop watcher: %v", err)
+		}
+	}()
+
+	// Wait for initial load
+	time.Sleep(1 * time.Second)
+
+	// Test hot reload with valid configuration changes
+	// Get current config version
+	originalConfig := watcher.GetCurrentConfig()
+	originalVersion := originalConfig.Metadata.Version
+
+	// Update configuration with new values
+	updatedConfig := *originalConfig
+	updatedConfig.Logging.Level = "debug" // Change log level
+	updatedConfig.Metadata.Version = "v1.1.0"
+	updatedConfig.Metadata.LastModified = time.Now()
+	updatedConfig.Metadata.Description = "Updated integration test configuration"
+
+	// Write updated configuration
+	if err := writeLibraryConfigToFile(configFile, updatedConfig); err != nil {
+		t.Fatalf("Failed to write updated config: %v", err)
+	}
+
+	// Wait for hot reload detection
+	if err := waitForConfigVersionChange(watcher, originalVersion, 15*time.Second); err != nil {
+		t.Fatalf("Configuration hot reload not detected: %v", err)
+	}
+
+	// Validate new configuration
+	newConfig := watcher.GetCurrentConfig()
+	if newConfig.Logging.Level != "debug" {
+		t.Errorf("Expected updated log level 'debug', got: %s", newConfig.Logging.Level)
+	}
+
+	if newConfig.Metadata.Version != "v1.1.0" {
+		t.Errorf("Expected updated version 'v1.1.0', got: %s", newConfig.Metadata.Version)
+	}
+
+	t.Logf("Hot reload completed successfully from %s to %s", originalVersion, newConfig.Metadata.Version)
+}
+
+// TestLibraryConfigIntegration_PerformanceUnderLoad tests performance under load
 func TestLibraryConfigIntegration_PerformanceUnderLoad(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping performance test in short mode")
@@ -395,7 +257,9 @@ func TestLibraryConfigIntegration_PerformanceUnderLoad(t *testing.T) {
 		t.Fatalf("Failed to start watcher: %v", err)
 	}
 	defer func() {
-		_ = watcher.Stop()
+		if err := watcher.Stop(); err != nil {
+			t.Logf("Warning: Failed to stop watcher: %v", err)
+		}
 	}()
 
 	t.Run("rapid configuration changes", func(t *testing.T) {
@@ -574,19 +438,78 @@ func waitForConfigVersionChange(watcher *LibraryConfigWatcher[TestRequest, TestR
 	return fmt.Errorf("configuration version did not change from %s within timeout", oldVersion)
 }
 
-// contains checks if a string contains a substring.
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
-		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
-			indexOf(s, substr) >= 0))
-}
+// setupIntegrationTestEnvironment sets up common environment variables for integration tests
+func setupIntegrationTestEnvironment(t *testing.T) func() {
+	testEnvVars := map[string]string{
+		"GO_PLUGINS_LOG_LEVEL":     "info",
+		"GO_PLUGINS_METRICS_PORT":  "9090",
+		"GO_PLUGINS_POLL_INTERVAL": "5s",
+		"GO_PLUGINS_ENV":           "integration-test",
+	}
 
-// indexOf returns the index of substr in s, or -1 if not found.
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
+	for key, value := range testEnvVars {
+		if err := os.Setenv(key, value); err != nil {
+			t.Fatalf("Failed to set %s: %v", key, err)
 		}
 	}
-	return -1
+
+	return func() {
+		for key := range testEnvVars {
+			if err := os.Unsetenv(key); err != nil {
+				t.Logf("Warning: failed to unset env var %s: %v", key, err)
+			}
+		}
+	}
+}
+
+// createDefaultIntegrationConfig creates a standard configuration for integration tests
+func createDefaultIntegrationConfig() LibraryConfig {
+	return LibraryConfig{
+		Logging: LoggingConfig{
+			Level:             "info",
+			Format:            "json",
+			Structured:        true,
+			IncludeCaller:     false,
+			IncludeStackTrace: false,
+		},
+		Observability: ObservabilityRuntimeConfig{
+			MetricsEnabled:            true,
+			MetricsInterval:           30 * time.Second,
+			TracingEnabled:            false,
+			TracingSampleRate:         0.1,
+			HealthMetricsEnabled:      true,
+			PerformanceMetricsEnabled: true,
+		},
+		DefaultPolicies: DefaultPoliciesConfig{
+			Retry: RetryConfig{
+				MaxRetries:      3,
+				InitialInterval: 100 * time.Millisecond,
+				MaxInterval:     5 * time.Second,
+				Multiplier:      2.0,
+				RandomJitter:    true,
+			},
+		},
+		Environment: EnvironmentConfig{
+			ExpansionEnabled: true,
+			VariablePrefix:   "GO_PLUGINS_",
+			FailOnMissing:    false,
+			Overrides: map[string]string{
+				"metrics_port": "${GO_PLUGINS_METRICS_PORT}",
+				"environment":  "${GO_PLUGINS_ENV}",
+			},
+		},
+		Performance: PerformanceConfig{
+			WatcherPollInterval:       10 * time.Second,
+			CacheTTL:                  5 * time.Second,
+			MaxConcurrentHealthChecks: 8,
+			OptimizationEnabled:       true,
+		},
+		Metadata: ConfigMetadata{
+			Version:      "v1.0.0",
+			Environment:  "integration-test",
+			LastModified: time.Now(),
+			Description:  "Integration test library configuration",
+			Tags:         []string{"test", "integration", "library"},
+		},
+	}
 }

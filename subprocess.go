@@ -64,6 +64,10 @@ type SubprocessPlugin[Req, Resp any] struct {
 	// State tracking
 	mutex  sync.RWMutex
 	logger Logger
+
+	// Plugin identity
+	name    string
+	version string
 }
 
 // ProcessInfo contains information about the running subprocess.
@@ -180,6 +184,9 @@ func (f *SubprocessPluginFactory[Req, Resp]) CreatePlugin(config PluginConfig) (
 		// Unified management (simplified architecture)
 		subprocessManager: subprocessManager,
 		logger:            logger,
+		// Plugin identity from config
+		name:    config.Name,
+		version: config.Version,
 	}
 
 	return plugin, nil
@@ -235,11 +242,41 @@ func (sp *SubprocessPlugin[Req, Resp]) Execute(ctx context.Context, execCtx Exec
 		"request_id", execCtx.RequestID,
 		"timeout", execCtx.Timeout)
 
-	// Execute request with streamlined communication flow
-	result, err := sp.executeRequest(ctx, execCtx, request)
+	// Serialize subprocess communication to prevent race conditions
+	sp.communicationMutex.Lock()
+	defer sp.communicationMutex.Unlock()
+
+	sp.logger.Debug("Executing subprocess request with streamlined flow",
+		"request_id", execCtx.RequestID)
+
+	// Get the process command and ensure we have access to stdin/stdout
+	cmd := sp.subprocessManager.GetCommand()
+	if cmd == nil {
+		return zero, NewProcessError("subprocess command not available", nil)
+	}
+
+	// Get or create communication pipes
+	stdin, stdout, err := sp.getCommunicationPipes(cmd)
 	if err != nil {
 		return zero, err
 	}
+
+	// Create execution context with timeout
+	execCtxWithTimeout := ctx
+	if execCtx.Timeout > 0 {
+		var cancel context.CancelFunc
+		execCtxWithTimeout, cancel = context.WithTimeout(ctx, execCtx.Timeout)
+		defer cancel()
+	}
+
+	// Execute JSON-based subprocess communication directly
+	result, err := sp.performJSONCommunication(execCtxWithTimeout, execCtx, request, stdin, stdout)
+	if err != nil {
+		return zero, err
+	}
+
+	sp.logger.Debug("Subprocess execution completed successfully",
+		"request_id", execCtx.RequestID)
 
 	return result, nil
 }
@@ -321,49 +358,70 @@ func (sp *SubprocessPlugin[Req, Resp]) ensureProcessStarted(ctx context.Context)
 	return nil
 }
 
-// executeRequest executes a request with streamlined communication flow.
-// This method combines the logic from executeViaStandardIO and executeJSONProtocol
-// for better readability and reduced complexity while maintaining thread safety.
-func (sp *SubprocessPlugin[Req, Resp]) executeRequest(ctx context.Context, execCtx ExecutionContext, request Req) (Resp, error) {
-	var zero Resp
-
-	// Serialize subprocess communication to prevent race conditions
-	sp.communicationMutex.Lock()
-	defer sp.communicationMutex.Unlock()
-
-	sp.logger.Debug("Executing subprocess request with streamlined flow",
-		"request_id", execCtx.RequestID)
-
-	// Get the process command and ensure we have access to stdin/stdout
-	cmd := sp.subprocessManager.GetCommand()
-	if cmd == nil {
-		return zero, NewProcessError("subprocess command not available", nil)
+// ensurePipe is a generic helper function that eliminates code duplication
+// between stdin and stdout pipe management. It implements the common pattern:
+// 1. Check cached pipe, 2. Check if already configured, 3. Check if process started, 4. Create new pipe
+func (sp *SubprocessPlugin[Req, Resp]) ensurePipe(
+	cmd *exec.Cmd,
+	pipeName string,
+	createPipeFunc func(*exec.Cmd) (interface{}, error),
+	getCachedPipeFunc func() interface{},
+) (interface{}, error) {
+	// Use cached pipe if available
+	if cached := getCachedPipeFunc(); cached != nil {
+		return nil, nil // Return nil to indicate no change needed
 	}
 
-	// Get or create communication pipes
-	stdin, stdout, err := sp.getCommunicationPipes(cmd)
+	// Check if pipe is already configured by another component
+	existingPipe, err := sp.checkExistingPipe(cmd, pipeName)
 	if err != nil {
-		return zero, err
+		return nil, err
+	}
+	if existingPipe != nil {
+		return existingPipe, nil
 	}
 
-	// Create execution context with timeout
-	execCtxWithTimeout := ctx
-	if execCtx.Timeout > 0 {
-		var cancel context.CancelFunc
-		execCtxWithTimeout, cancel = context.WithTimeout(ctx, execCtx.Timeout)
-		defer cancel()
+	// Process is already started, we can't create new pipes
+	if sp.subprocessManager.IsStarted() {
+		return nil, NewProcessError("cannot create "+pipeName+" pipe after process started", nil)
 	}
 
-	// Execute JSON-based subprocess communication
-	response, err := sp.performJSONCommunication(execCtxWithTimeout, execCtx, request, stdin, stdout)
+	// Create new pipe
+	newPipe, err := createPipeFunc(cmd)
 	if err != nil {
-		return zero, err
+		return nil, NewProcessError("failed to create "+pipeName+" pipe", err)
 	}
 
-	sp.logger.Debug("Subprocess execution completed successfully",
-		"request_id", execCtx.RequestID)
+	sp.logger.Debug("Created " + pipeName + " pipe for subprocess communication")
+	return newPipe, nil
+}
 
-	return response, nil
+// checkExistingPipe checks if a pipe is already configured and validates its type
+func (sp *SubprocessPlugin[Req, Resp]) checkExistingPipe(cmd *exec.Cmd, pipeName string) (interface{}, error) {
+	var existingPipe interface{}
+	var isCorrectType bool
+
+	switch pipeName {
+	case "stdin":
+		if cmd.Stdin != nil {
+			existingPipe, isCorrectType = cmd.Stdin.(io.WriteCloser)
+		}
+	case "stdout":
+		if cmd.Stdout != nil {
+			existingPipe, isCorrectType = cmd.Stdout.(io.ReadCloser)
+		}
+	}
+
+	if existingPipe == nil {
+		return nil, nil
+	}
+
+	if isCorrectType {
+		sp.logger.Debug("Using existing " + pipeName + " pipe for subprocess communication")
+		return existingPipe, nil
+	}
+
+	return nil, NewProcessError(pipeName+" already configured but not correct type", nil)
 }
 
 // getCommunicationPipes retrieves or creates stdin and stdout pipes for communication.
@@ -381,82 +439,40 @@ func (sp *SubprocessPlugin[Req, Resp]) getCommunicationPipes(cmd *exec.Cmd) (io.
 // ensureCommunicationPipes ensures that stdin and stdout pipes are properly configured.
 // This method provides elegant, centralized pipe management with robust error handling.
 func (sp *SubprocessPlugin[Req, Resp]) ensureCommunicationPipes(cmd *exec.Cmd) error {
-	// Ensure stdin pipe is configured
-	if err := sp.ensureStdinPipe(cmd); err != nil {
+	// Ensure stdin pipe is configured using the generic pipe helper
+	stdin, err := sp.ensurePipe(cmd, "stdin", func(c *exec.Cmd) (interface{}, error) {
+		return c.StdinPipe()
+	}, func() interface{} {
+		return sp.stdin
+	})
+	if err != nil {
 		return NewCommunicationError("failed to ensure stdin pipe", err)
 	}
+	if stdin != nil {
+		if writeCloser, ok := stdin.(io.WriteCloser); ok {
+			sp.stdin = writeCloser
+		} else {
+			return NewCommunicationError("stdin pipe is not io.WriteCloser", nil)
+		}
+	}
 
-	// Ensure stdout pipe is configured
-	if err := sp.ensureStdoutPipe(cmd); err != nil {
+	// Ensure stdout pipe is configured using the generic pipe helper
+	stdout, err := sp.ensurePipe(cmd, "stdout", func(c *exec.Cmd) (interface{}, error) {
+		return c.StdoutPipe()
+	}, func() interface{} {
+		return sp.stdout
+	})
+	if err != nil {
 		return NewCommunicationError("failed to ensure stdout pipe", err)
 	}
-
-	return nil
-}
-
-// ensureStdinPipe ensures the stdin pipe is properly configured with elegant caching logic.
-func (sp *SubprocessPlugin[Req, Resp]) ensureStdinPipe(cmd *exec.Cmd) error {
-	// Use cached pipe if available
-	if sp.stdin != nil {
-		return nil
-	}
-
-	// Check if stdin is already configured by another component
-	if cmd.Stdin != nil {
-		if writeCloser, ok := cmd.Stdin.(io.WriteCloser); ok {
-			sp.stdin = writeCloser
-			sp.logger.Debug("Using existing stdin pipe for subprocess communication")
-			return nil
-		}
-		return NewProcessError("stdin already configured but not writable", nil)
-	}
-
-	// Process is already started, we can't create new pipes
-	if sp.subprocessManager.IsStarted() {
-		return NewProcessError("cannot create stdin pipe after process started", nil)
-	}
-
-	// Create new stdin pipe
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return NewProcessError("failed to create stdin pipe", err)
-	}
-
-	sp.stdin = stdin
-	sp.logger.Debug("Created stdin pipe for subprocess communication")
-	return nil
-}
-
-// ensureStdoutPipe ensures the stdout pipe is properly configured with elegant caching logic.
-func (sp *SubprocessPlugin[Req, Resp]) ensureStdoutPipe(cmd *exec.Cmd) error {
-	// Use cached pipe if available
-	if sp.stdout != nil {
-		return nil
-	}
-
-	// Check if stdout is already configured by another component
-	if cmd.Stdout != nil {
-		if readCloser, ok := cmd.Stdout.(io.ReadCloser); ok {
+	if stdout != nil {
+		if readCloser, ok := stdout.(io.ReadCloser); ok {
 			sp.stdout = readCloser
-			sp.logger.Debug("Using existing stdout pipe for subprocess communication")
-			return nil
+		} else {
+			return NewCommunicationError("stdout pipe is not io.ReadCloser", nil)
 		}
-		return NewProcessError("stdout already configured but not readable", nil)
 	}
 
-	// Process is already started, we can't create new pipes
-	if sp.subprocessManager.IsStarted() {
-		return NewProcessError("cannot create stdout pipe after process started", nil)
-	}
-
-	// Create new stdout pipe
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return NewProcessError("failed to create stdout pipe", err)
-	}
-
-	sp.stdout = stdout
-	sp.logger.Debug("Created stdout pipe for subprocess communication")
 	return nil
 }
 
@@ -696,8 +712,8 @@ func (sp *SubprocessPlugin[Req, Resp]) Info() PluginInfo {
 	}
 
 	return PluginInfo{
-		Name:         "subprocess-plugin",
-		Version:      "1.0.0",
+		Name:         sp.name,    // Use the actual plugin name from config
+		Version:      sp.version, // Use the actual plugin version from config
 		Description:  "Subprocess plugin with refactored architecture",
 		Author:       "AGILira go-plugins",
 		Capabilities: []string{"subprocess", "process-management", "standard-protocol", "refactored-soc"},

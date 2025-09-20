@@ -59,7 +59,11 @@ func TestSecurityValidator_WhitelistValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Warning: Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create sample whitelist
 	whitelistFile := filepath.Join(tempDir, "whitelist.json")
@@ -147,7 +151,11 @@ func TestSecurityValidator_Policies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Warning: Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	whitelistFile := filepath.Join(tempDir, "whitelist.json")
 	err = CreateSampleWhitelist(whitelistFile)
@@ -169,7 +177,9 @@ func TestSecurityValidator_Policies(t *testing.T) {
 		t.Fatalf("Failed to create security validator: %v", err)
 	}
 
-	_ = validator.Enable() // Ignore error for test
+	if err := validator.Enable(); err != nil {
+		t.Logf("Warning: Failed to enable validator: %v", err)
+	}
 
 	pluginConfig := PluginConfig{
 		Name: "unknown-plugin",
@@ -177,17 +187,18 @@ func TestSecurityValidator_Policies(t *testing.T) {
 	}
 
 	result, err := validator.ValidatePlugin(pluginConfig, "")
-	if err != nil {
-		t.Fatalf("Validation failed: %v", err)
+	if err == nil {
+		t.Error("Disabled policy should return error (security improvement)")
 	}
-
-	if !result.Authorized {
-		t.Error("Plugin should be authorized in disabled mode")
+	if result != nil {
+		t.Error("Disabled policy should not return result (security improvement)")
 	}
 
 	// Test permissive policy
 	config.Policy = SecurityPolicyPermissive
-	_ = validator.UpdateConfig(config) // Ignore error for test
+	if err := validator.UpdateConfig(config); err != nil {
+		t.Logf("Warning: Failed to update config: %v", err)
+	}
 
 	result, err = validator.ValidatePlugin(pluginConfig, "")
 	if err != nil {
@@ -204,7 +215,9 @@ func TestSecurityValidator_Policies(t *testing.T) {
 
 	// Test audit-only policy
 	config.Policy = SecurityPolicyAuditOnly
-	_ = validator.UpdateConfig(config) // Ignore error for test
+	if err := validator.UpdateConfig(config); err != nil {
+		t.Logf("Warning: Failed to update config: %v", err)
+	}
 
 	result, err = validator.ValidatePlugin(pluginConfig, "")
 	if err != nil {
@@ -222,7 +235,11 @@ func TestSecurityValidator_ArgusIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Warning: Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	whitelistFile := filepath.Join(tempDir, "whitelist.json")
 	auditFile := filepath.Join(tempDir, "audit.jsonl")
@@ -295,7 +312,11 @@ func TestSecurityValidator_HashValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Warning: Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create a test plugin file
 	testPluginFile := filepath.Join(tempDir, "test_plugin.so")
@@ -335,7 +356,11 @@ func BenchmarkSecurityValidator(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			b.Logf("Warning: Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	whitelistFile := filepath.Join(tempDir, "whitelist.json")
 	err = CreateSampleWhitelist(whitelistFile)
@@ -355,7 +380,9 @@ func BenchmarkSecurityValidator(b *testing.B) {
 		b.Fatalf("Failed to create security validator: %v", err)
 	}
 
-	_ = validator.Enable() // Ignore error for benchmark
+	if err := validator.Enable(); err != nil {
+		b.Logf("Warning: Failed to enable validator: %v", err)
+	}
 
 	pluginConfig := PluginConfig{
 		Name: "auth-service",
@@ -378,7 +405,11 @@ func TestManager_SecurityIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Warning: Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	whitelistFile := filepath.Join(tempDir, "whitelist.json")
 	err = CreateSampleWhitelist(whitelistFile)

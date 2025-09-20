@@ -234,6 +234,7 @@ func NewManager[Req, Resp any](logger any) *Manager[Req, Resp] {
 	securityValidator, err := NewSecurityValidator(securityConfig, internalLogger)
 	if err != nil {
 		internalLogger.Warn("Failed to initialize security validator", "error", err)
+		securityValidator = nil // Ensure nil on failure
 	}
 
 	manager := &Manager[Req, Resp]{
@@ -365,6 +366,12 @@ func (m *Manager[Req, Resp]) GetObservabilityMetrics() map[string]interface{} {
 // addManagerMetrics adds basic manager metrics
 func (m *Manager[Req, Resp]) addManagerMetrics(metrics map[string]interface{}) {
 	managerMetrics := m.GetMetrics()
+
+	// Get registered plugins count
+	m.mu.RLock()
+	pluginsCount := len(m.plugins)
+	m.mu.RUnlock()
+
 	metrics["manager"] = map[string]interface{}{
 		"requests_total":        managerMetrics.RequestsTotal.Load(),
 		"requests_success":      managerMetrics.RequestsSuccess.Load(),
@@ -373,6 +380,9 @@ func (m *Manager[Req, Resp]) addManagerMetrics(metrics map[string]interface{}) {
 		"circuit_breaker_trips": managerMetrics.CircuitBreakerTrips.Load(),
 		"health_check_failures": managerMetrics.HealthCheckFailures.Load(),
 	}
+
+	// Add the missing metric that tests expect
+	metrics["registered_plugins_count"] = pluginsCount
 }
 
 // addGlobalMetrics adds runtime observability metrics

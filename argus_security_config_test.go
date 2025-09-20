@@ -392,7 +392,9 @@ func TestSecurityConfigHotReload(t *testing.T) {
 		t.Fatalf("Failed to start watcher: %v", err)
 	}
 	defer func() {
-		_ = watcher.Stop()
+		if err := watcher.Stop(); err != nil {
+			t.Logf("Warning: Failed to stop watcher: %v", err)
+		}
 	}()
 
 	// Wait for initial load

@@ -43,6 +43,7 @@ func TestSubprocessJSONCommunication_SingleRequest(t *testing.T) {
 		Endpoint:   pluginPath,
 		Executable: pluginPath,
 		Enabled:    true,
+		Auth:       AuthConfig{Method: AuthNone},
 	}
 
 	plugin, err := factory.CreatePlugin(config)
@@ -91,6 +92,7 @@ func TestSubprocessJSONCommunication_ConcurrentRequests(t *testing.T) {
 		Endpoint:   pluginPath,
 		Executable: pluginPath,
 		Enabled:    true,
+		Auth:       AuthConfig{Method: AuthNone},
 	}
 
 	plugin, err := factory.CreatePlugin(config)
@@ -250,8 +252,17 @@ func main() {
 }
 `
 
-	err = os.WriteFile(goSourcePath, []byte(goContent), 0755)
+	err = os.WriteFile(goSourcePath, []byte(goContent), 0644)
 	require.NoError(t, err)
 
-	return goSourcePath
+	// Compile the Go program to executable
+	executablePath := filepath.Join(tmpDir, "json_plugin")
+	if runtime.GOOS == "windows" {
+		executablePath += ".exe"
+	}
+
+	err = compileGoProgram(goSourcePath, executablePath)
+	require.NoError(t, err, "Failed to compile JSON plugin executable")
+
+	return executablePath
 }

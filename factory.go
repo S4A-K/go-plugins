@@ -14,74 +14,55 @@ import (
 	"fmt"
 )
 
-// UnifiedPluginFactory provides a simplified interface for creating plugins.
+// UnifiedPluginFactory provides a registry-based approach to plugin creation.
 //
-// This factory consolidates common plugin creation patterns and reduces
-// the amount of boilerplate code needed to create different types of plugins.
-// It maintains compatibility with existing factory interfaces while providing
-// a more streamlined creation process.
+// This factory acts as a registry that delegates to specialized factory implementations,
+// eliminating code duplication and maintaining proper separation of concerns.
+// It conforms to the standard PluginFactory interface while providing extensibility.
 type UnifiedPluginFactory[Req, Resp any] struct {
 	logger Logger
 
-	// Factory functions for different plugin types
-	subprocessFactory func(PluginConfig) (Plugin[Req, Resp], error)
-	grpcFactory       func(PluginConfig) (Plugin[Req, Resp], error)
-	customFactories   map[string]func(PluginConfig) (Plugin[Req, Resp], error)
+	// Registry of specialized factory implementations
+	factories map[string]PluginFactory[Req, Resp]
 }
 
 // NewUnifiedPluginFactory creates a new unified plugin factory.
 //
-// This factory can handle multiple plugin types through a single interface,
-// reducing the complexity of factory management while maintaining type safety.
+// This factory acts as a registry that delegates to specialized factories,
+// eliminating redundancy while maintaining type safety and extensibility.
 func NewUnifiedPluginFactory[Req, Resp any](logger any) *UnifiedPluginFactory[Req, Resp] {
 	internalLogger := NewLogger(logger)
 
 	factory := &UnifiedPluginFactory[Req, Resp]{
-		logger:          internalLogger,
-		customFactories: make(map[string]func(PluginConfig) (Plugin[Req, Resp], error)),
+		logger:    internalLogger,
+		factories: make(map[string]PluginFactory[Req, Resp]),
 	}
 
-	// Initialize default factory functions
-	factory.initializeDefaultFactories()
+	// Register default specialized factories
+	factory.registerDefaultFactories()
 
 	return factory
 }
 
 // CreatePlugin creates a plugin based on the configuration.
 //
-// This method automatically determines the appropriate factory function
-// based on the plugin configuration and delegates creation accordingly.
+// This method validates configuration first, then delegates to the appropriate
+// specialized factory, maintaining both validation and separation of concerns.
 func (uf *UnifiedPluginFactory[Req, Resp]) CreatePlugin(config PluginConfig) (Plugin[Req, Resp], error) {
-	// Validate configuration
-	if err := config.Validate(); err != nil {
-		return nil, NewPluginCreationError("invalid plugin configuration", err)
+	// First validate basic configuration
+	if err := uf.validateConfiguration(config); err != nil {
+		return nil, NewPluginCreationError(fmt.Sprintf("invalid plugin configuration: %v", err), err)
 	}
 
-	// Determine factory function based on transport type
-	var factoryFunc func(PluginConfig) (Plugin[Req, Resp], error)
-
-	switch config.Transport {
-	case TransportExecutable:
-		factoryFunc = uf.subprocessFactory
-	case TransportGRPC, TransportGRPCTLS:
-		factoryFunc = uf.grpcFactory
-	default:
-		// Check custom factories
-		if customFunc, exists := uf.customFactories[string(config.Transport)]; exists {
-			factoryFunc = customFunc
-		} else {
-			return nil, NewPluginCreationError(
-				fmt.Sprintf("unsupported transport type: %s", config.Transport), nil)
-		}
-	}
-
-	if factoryFunc == nil {
+	// Find the appropriate factory for this transport
+	factory, exists := uf.factories[string(config.Transport)]
+	if !exists {
 		return nil, NewPluginCreationError(
-			fmt.Sprintf("no factory function available for transport: %s", config.Transport), nil)
+			fmt.Sprintf("unsupported transport type: %s", config.Transport), nil)
 	}
 
-	// Create plugin using the appropriate factory
-	plugin, err := factoryFunc(config)
+	// Delegate to the specialized factory
+	plugin, err := factory.CreatePlugin(config)
 	if err != nil {
 		return nil, NewPluginCreationError(
 			fmt.Sprintf("failed to create %s plugin", config.Transport), err)
@@ -95,141 +76,162 @@ func (uf *UnifiedPluginFactory[Req, Resp]) CreatePlugin(config PluginConfig) (Pl
 	return plugin, nil
 }
 
-// RegisterCustomFactory registers a custom factory function for a specific transport type.
+// RegisterFactory registers a factory for a specific transport type.
 //
-// This method allows extending the unified factory with support for custom
-// transport types without modifying the core factory code.
-func (uf *UnifiedPluginFactory[Req, Resp]) RegisterCustomFactory(
+// This method allows extending the unified factory with custom implementations
+// while maintaining the standard PluginFactory interface contract.
+func (uf *UnifiedPluginFactory[Req, Resp]) RegisterFactory(
 	transportType string,
-	factoryFunc func(PluginConfig) (Plugin[Req, Resp], error)) error {
+	factory PluginFactory[Req, Resp]) error {
 
 	if transportType == "" {
 		return NewConfigValidationError("transport type cannot be empty", nil)
 	}
 
-	if factoryFunc == nil {
-		return NewConfigValidationError("factory function cannot be nil", nil)
+	if factory == nil {
+		return NewConfigValidationError("factory cannot be nil", nil)
 	}
 
-	uf.customFactories[transportType] = factoryFunc
-	uf.logger.Info("Custom factory registered", "transport_type", transportType)
+	uf.factories[transportType] = factory
+	uf.logger.Info("Factory registered", "transport_type", transportType)
 
 	return nil
 }
 
-// GetSupportedTransports returns a list of supported transport types.
-func (uf *UnifiedPluginFactory[Req, Resp]) GetSupportedTransports() []string {
-	transports := []string{}
-
-	// Add built-in transports
-	if uf.subprocessFactory != nil {
-		transports = append(transports, string(TransportExecutable))
-	}
-
-	if uf.grpcFactory != nil {
-		transports = append(transports, string(TransportGRPC), string(TransportGRPCTLS))
-	}
-
-	// Add custom transports
-	for transportType := range uf.customFactories {
+// SupportedTransports implements PluginFactory interface.
+func (uf *UnifiedPluginFactory[Req, Resp]) SupportedTransports() []string {
+	transports := make([]string, 0, len(uf.factories))
+	for transportType := range uf.factories {
 		transports = append(transports, transportType)
 	}
-
 	return transports
 }
 
-// initializeDefaultFactories sets up the default factory functions.
-func (uf *UnifiedPluginFactory[Req, Resp]) initializeDefaultFactories() {
-	// Subprocess factory
-	uf.subprocessFactory = func(config PluginConfig) (Plugin[Req, Resp], error) {
-		return uf.createSubprocessPlugin(config)
+// ValidateConfig implements PluginFactory interface.
+func (uf *UnifiedPluginFactory[Req, Resp]) ValidateConfig(config PluginConfig) error {
+	// Validate basic configuration first
+	if err := uf.validateConfiguration(config); err != nil {
+		return err
 	}
 
-	// gRPC factory
-	uf.grpcFactory = func(config PluginConfig) (Plugin[Req, Resp], error) {
-		return uf.createGRPCPlugin(config)
+	// Find the appropriate factory for this transport
+	factory, exists := uf.factories[string(config.Transport)]
+	if !exists {
+		return NewConfigValidationError(
+			fmt.Sprintf("unsupported transport type: %s", config.Transport), nil)
+	}
+
+	// Delegate validation to the specialized factory
+	return factory.ValidateConfig(config)
+}
+
+// validateConfiguration performs basic configuration validation
+func (uf *UnifiedPluginFactory[Req, Resp]) validateConfiguration(config PluginConfig) error {
+	// Validate basic config
+	if err := config.validateBasicConfig(); err != nil {
+		return err
+	}
+
+	// Validate authentication configuration
+	if err := config.Auth.Validate(); err != nil {
+		return NewAuthConfigValidationError(err)
+	}
+
+	return nil
+}
+
+// registerDefaultFactories registers the default specialized factories.
+func (uf *UnifiedPluginFactory[Req, Resp]) registerDefaultFactories() {
+	// Register subprocess factory for executable transport
+	subprocessFactory := NewSubprocessPluginFactory[Req, Resp](uf.logger)
+	uf.factories[string(TransportExecutable)] = subprocessFactory
+
+	// Only register gRPC factory if types implement ProtobufMessage
+	if uf.canUseGRPCFactory() {
+		uf.registerGRPCFactory()
 	}
 }
 
-// createSubprocessPlugin creates a subprocess plugin using the unified subprocess manager.
-func (uf *UnifiedPluginFactory[Req, Resp]) createSubprocessPlugin(config PluginConfig) (Plugin[Req, Resp], error) {
-	if config.Endpoint == "" {
-		return nil, NewConfigValidationError("executable path cannot be empty for subprocess transport", nil)
+// canUseGRPCFactory checks if Req and Resp types implement ProtobufMessage.
+func (uf *UnifiedPluginFactory[Req, Resp]) canUseGRPCFactory() bool {
+	var reqZero Req
+	var respZero Resp
+
+	_, reqOK := any(reqZero).(ProtobufMessage)
+	_, respOK := any(respZero).(ProtobufMessage)
+
+	return reqOK && respOK
+}
+
+// registerGRPCFactory safely registers gRPC factory with proper type constraints.
+func (uf *UnifiedPluginFactory[Req, Resp]) registerGRPCFactory() {
+	// This is safe because canUseGRPCFactory() verified the constraints
+	if factory := uf.createGRPCFactoryAdapter(); factory != nil {
+		uf.factories[string(TransportGRPC)] = factory
+		uf.factories[string(TransportGRPCTLS)] = factory
 	}
+}
 
-	// Create unified subprocess manager configuration
-	managerConfig := SubprocessManagerConfig{
-		BaseConfig:     BaseConfig{}.WithDefaults(),
-		ExecutablePath: config.Endpoint,
-		Logger:         uf.logger.With("plugin", config.Name),
+// createGRPCFactoryAdapter creates a type-safe adapter for gRPC factory.
+func (uf *UnifiedPluginFactory[Req, Resp]) createGRPCFactoryAdapter() PluginFactory[Req, Resp] {
+	// Create the specialized gRPC factory
+	grpcFactory := NewGRPCPluginFactory[ProtobufMessage, ProtobufMessage](uf.logger)
+
+	// Return an adapter that safely delegates to the gRPC factory
+	return &grpcFactoryAdapter[Req, Resp]{
+		grpcFactory: grpcFactory,
+		logger:      uf.logger,
 	}
+}
 
-	// Apply plugin-specific configuration
-	if args, ok := config.Options["args"].([]string); ok {
-		managerConfig.Args = args
-	}
+// grpcFactoryAdapter adapts the specialized gRPC factory to work with any types
+// that implement ProtobufMessage, providing type safety through runtime checks.
+type grpcFactoryAdapter[Req, Resp any] struct {
+	grpcFactory PluginFactory[ProtobufMessage, ProtobufMessage]
+	logger      Logger
+}
 
-	if env, ok := config.Options["env"].([]string); ok {
-		managerConfig.Env = env
-	}
-
-	// Apply component configurations from plugin options
-	if handshakeConfig, ok := config.Options["handshake_config"].(HandshakeConfig); ok {
-		managerConfig.HandshakeConfig = handshakeConfig
-	} else {
-		managerConfig.HandshakeConfig = DefaultHandshakeConfig
-	}
-
-	if streamConfig, ok := config.Options["stream_sync_config"].(StreamSyncConfig); ok {
-		managerConfig.StreamConfig = streamConfig
-	} else {
-		managerConfig.StreamConfig = DefaultStreamSyncConfig
-		// Disable stdout syncing for subprocess communication to avoid pipe conflicts
-		managerConfig.StreamConfig.SyncStdout = false
-	}
-
-	if bridgeConfig, ok := config.Options["bridge_config"].(BridgeConfig); ok {
-		managerConfig.BridgeConfig = bridgeConfig
-	} else {
-		managerConfig.BridgeConfig = DefaultBridgeConfig
-	}
-
-	// Apply defaults
-	managerConfig.ApplyDefaults()
-
-	// Validate configuration
-	if err := managerConfig.Validate(); err != nil {
+// CreatePlugin implements PluginFactory interface with type-safe delegation.
+func (gfa *grpcFactoryAdapter[Req, Resp]) CreatePlugin(config PluginConfig) (Plugin[Req, Resp], error) {
+	// Delegate to the specialized gRPC factory
+	plugin, err := gfa.grpcFactory.CreatePlugin(config)
+	if err != nil {
 		return nil, err
 	}
 
-	// Create subprocess manager
-	subprocessManager := NewSubprocessManager(managerConfig)
+	// Safe cast - we verified types implement ProtobufMessage in canUseGRPCFactory()
+	result, ok := any(plugin).(Plugin[Req, Resp])
+	if !ok {
+		return nil, NewPluginCreationError(
+			"failed to cast gRPC plugin to expected type", nil)
+	}
 
-	// Create and return subprocess plugin with the unified manager
-	return NewSubprocessPluginWithManager[Req, Resp](config, subprocessManager, uf.logger)
+	return result, nil
 }
 
-// createGRPCPlugin creates a gRPC plugin using existing gRPC factory logic.
-func (uf *UnifiedPluginFactory[Req, Resp]) createGRPCPlugin(_ PluginConfig) (Plugin[Req, Resp], error) {
-	// Note: gRPC plugin creation requires specific protobuf constraints
-	// For now, we return an error indicating that gRPC plugins should be created
-	// using the dedicated gRPC factory until we implement proper constraint handling
-	return nil, NewPluginCreationError("gRPC plugin creation through unified factory not yet implemented", nil)
+// SupportedTransports implements PluginFactory interface.
+func (gfa *grpcFactoryAdapter[Req, Resp]) SupportedTransports() []string {
+	return gfa.grpcFactory.SupportedTransports()
+}
+
+// ValidateConfig implements PluginFactory interface.
+func (gfa *grpcFactoryAdapter[Req, Resp]) ValidateConfig(config PluginConfig) error {
+	return gfa.grpcFactory.ValidateConfig(config)
 }
 
 // FactoryBuilder provides a fluent interface for building unified factories.
 //
 // This builder pattern simplifies the creation of unified factories with
-// specific configurations and custom factory functions.
+// specific configurations and custom factory implementations.
 type FactoryBuilder[Req, Resp any] struct {
 	logger          any
-	customFactories map[string]func(PluginConfig) (Plugin[Req, Resp], error)
+	customFactories map[string]PluginFactory[Req, Resp]
 }
 
 // NewFactoryBuilder creates a new factory builder.
 func NewFactoryBuilder[Req, Resp any]() *FactoryBuilder[Req, Resp] {
 	return &FactoryBuilder[Req, Resp]{
-		customFactories: make(map[string]func(PluginConfig) (Plugin[Req, Resp], error)),
+		customFactories: make(map[string]PluginFactory[Req, Resp]),
 	}
 }
 
@@ -239,12 +241,12 @@ func (fb *FactoryBuilder[Req, Resp]) WithLogger(logger any) *FactoryBuilder[Req,
 	return fb
 }
 
-// WithCustomFactory adds a custom factory function for a specific transport type.
+// WithCustomFactory adds a custom factory for a specific transport type.
 func (fb *FactoryBuilder[Req, Resp]) WithCustomFactory(
 	transportType string,
-	factoryFunc func(PluginConfig) (Plugin[Req, Resp], error)) *FactoryBuilder[Req, Resp] {
+	factory PluginFactory[Req, Resp]) *FactoryBuilder[Req, Resp] {
 
-	fb.customFactories[transportType] = factoryFunc
+	fb.customFactories[transportType] = factory
 	return fb
 }
 
@@ -253,8 +255,8 @@ func (fb *FactoryBuilder[Req, Resp]) Build() *UnifiedPluginFactory[Req, Resp] {
 	factory := NewUnifiedPluginFactory[Req, Resp](fb.logger)
 
 	// Register custom factories
-	for transportType, factoryFunc := range fb.customFactories {
-		if err := factory.RegisterCustomFactory(transportType, factoryFunc); err != nil {
+	for transportType, customFactory := range fb.customFactories {
+		if err := factory.RegisterFactory(transportType, customFactory); err != nil {
 			// Log error but continue with other factories
 			// In a builder pattern, we don't want to fail completely
 		}
@@ -287,7 +289,12 @@ func NewSimpleGRPCFactory[Req, Resp any](logger any) PluginFactory[Req, Resp] {
 		if _, respOK := any(respZero).(ProtobufMessage); respOK {
 			// Both types implement ProtobufMessage, use gRPC factory
 			// Cast is safe because we verified the interface implementation
-			return any(NewGRPCPluginFactory[ProtobufMessage, ProtobufMessage](logger)).(PluginFactory[Req, Resp])
+			factory, ok := any(NewGRPCPluginFactory[ProtobufMessage, ProtobufMessage](logger)).(PluginFactory[Req, Resp])
+			if !ok {
+				// If cast fails, fallback to subprocess factory
+				return NewSubprocessPluginFactory[Req, Resp](logger)
+			}
+			return factory
 		}
 	}
 
