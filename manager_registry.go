@@ -16,7 +16,34 @@ import (
 
 // Plugin Registry Management Methods
 
-// Register implements PluginManager.Register
+// Register implements PluginManager.Register.
+// This method provides a simplified interface for plugin registration using default
+// configuration settings. It's the most common way to register plugins when no
+// custom configuration is needed.
+//
+// The method automatically:
+//   - Extracts plugin information from the plugin's Info() method
+//   - Uses the plugin name as the configuration name
+//   - Applies default security settings if security is enabled
+//   - Initializes circuit breakers and health checkers with default settings
+//
+// This is equivalent to calling RegisterWithConfig with an empty PluginConfig,
+// which causes the manager to derive all configuration from the plugin's metadata
+// and apply system defaults.
+//
+// Parameters:
+//   - plugin: Plugin instance to register (must implement Plugin interface)
+//
+// Returns:
+//   - Error if registration fails due to validation, security, or runtime issues
+//
+// Example:
+//
+//	plugin := myPlugin{name: "auth-service"}
+//	err := manager.Register(plugin)
+//	if err != nil {
+//	    log.Printf("Failed to register plugin: %v", err)
+//	}
 func (m *Manager[Req, Resp]) Register(plugin Plugin[Req, Resp]) error {
 	return m.RegisterWithConfig(plugin, PluginConfig{})
 }
@@ -236,7 +263,32 @@ func (m *Manager[Req, Resp]) initializeHealthComponents(plugin Plugin[Req, Resp]
 	m.initializeHealthStatus(pluginName)
 }
 
-// Unregister implements PluginManager.Unregister
+// Unregister implements PluginManager.Unregister.
+// This method removes a plugin from the manager and performs complete cleanup
+// of all associated resources including health checkers, circuit breakers, and metrics.
+//
+// The unregistration process:
+//  1. Validates that the plugin exists
+//  2. Stops health monitoring for the plugin
+//  3. Cleans up circuit breaker and health status
+//  4. Calls the plugin's Close() method for resource cleanup
+//  5. Removes the plugin from the registry
+//
+// Note: This method does not wait for active requests to complete. For graceful
+// removal that waits for request draining, use GracefulUnregister instead.
+//
+// Parameters:
+//   - name: Name of the plugin to unregister
+//
+// Returns:
+//   - Error if plugin not found or cleanup fails
+//
+// Example:
+//
+//	err := manager.Unregister("auth-service")
+//	if err != nil {
+//	    log.Printf("Failed to unregister plugin: %v", err)
+//	}
 func (m *Manager[Req, Resp]) Unregister(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -265,7 +317,32 @@ func (m *Manager[Req, Resp]) Unregister(name string) error {
 	return nil
 }
 
-// GetPlugin implements PluginManager.GetPlugin
+// GetPlugin implements PluginManager.GetPlugin.
+// This method retrieves a registered plugin by name, providing thread-safe access
+// to plugin instances for direct method calls or inspection.
+//
+// Use cases:
+//   - Direct plugin method invocation outside of the Execute framework
+//   - Plugin introspection and debugging
+//   - Custom plugin management scenarios
+//   - Plugin health status checking
+//
+// Parameters:
+//   - name: Name of the plugin to retrieve
+//
+// Returns:
+//   - Plugin instance if found
+//   - Error if plugin not found
+//
+// Example:
+//
+//	plugin, err := manager.GetPlugin("auth-service")
+//	if err != nil {
+//	    log.Printf("Plugin not found: %v", err)
+//	    return
+//	}
+//	info := plugin.Info()
+//	fmt.Printf("Plugin version: %s", info.Version)
 func (m *Manager[Req, Resp]) GetPlugin(name string) (Plugin[Req, Resp], error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -278,7 +355,35 @@ func (m *Manager[Req, Resp]) GetPlugin(name string) (Plugin[Req, Resp], error) {
 	return plugin, nil
 }
 
-// RegisterFactory registers a plugin factory for a specific plugin type
+// RegisterFactory registers a plugin factory for a specific plugin type.
+// This method enables the manager to create plugin instances from configuration
+// during LoadFromConfig operations. Each plugin type requires a corresponding factory.
+//
+// The factory is responsible for:
+//   - Creating plugin instances from PluginConfig
+//   - Validating plugin-specific configuration
+//   - Handling transport-specific initialization
+//   - Supporting the plugin lifecycle
+//
+// Common factory types:
+//   - "subprocess": For executable-based plugins (recommended)
+//   - "grpc": For gRPC-based plugins
+//   - Custom types: For specialized plugin implementations
+//
+// Parameters:
+//   - pluginType: Unique identifier for the plugin type (matches PluginConfig.Type)
+//   - factory: Factory implementation that can create plugins of this type
+//
+// Returns:
+//   - Error if a factory for this type is already registered
+//
+// Example:
+//
+//	subprocessFactory := NewSubprocessPluginFactory[MyReq, MyResp](logger)
+//	err := manager.RegisterFactory("subprocess", subprocessFactory)
+//	if err != nil {
+//	    log.Printf("Failed to register factory: %v", err)
+//	}
 func (m *Manager[Req, Resp]) RegisterFactory(pluginType string, factory PluginFactory[Req, Resp]) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -291,7 +396,32 @@ func (m *Manager[Req, Resp]) RegisterFactory(pluginType string, factory PluginFa
 	return nil
 }
 
-// GetFactory retrieves a plugin factory by type
+// GetFactory retrieves a plugin factory by type.
+// This method provides access to registered factories for plugin creation,
+// factory inspection, or custom plugin management scenarios.
+//
+// Use cases:
+//   - Custom plugin creation outside of LoadFromConfig
+//   - Factory capability inspection
+//   - Dynamic factory selection
+//   - Plugin system introspection
+//
+// Parameters:
+//   - pluginType: Type identifier for the desired factory
+//
+// Returns:
+//   - Factory instance if registered
+//   - Error if no factory is registered for the specified type
+//
+// Example:
+//
+//	factory, err := manager.GetFactory("subprocess")
+//	if err != nil {
+//	    log.Printf("Factory not found: %v", err)
+//	    return
+//	}
+//	supportedTransports := factory.SupportedTransports()
+//	fmt.Printf("Supported transports: %v", supportedTransports)
 func (m *Manager[Req, Resp]) GetFactory(pluginType string) (PluginFactory[Req, Resp], error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -318,7 +448,36 @@ func (m *Manager[Req, Resp]) closeAllPlugins() {
 	m.plugins = make(map[string]Plugin[Req, Resp])
 }
 
-// GracefulUnregister removes a plugin after draining all active requests
+// GracefulUnregister removes a plugin after draining all active requests.
+// This method provides a safe way to remove plugins without interrupting ongoing
+// operations, making it ideal for maintenance, updates, and graceful degradation scenarios.
+//
+// The graceful unregistration process:
+//  1. Validates that the plugin exists
+//  2. Initiates request draining with the specified timeout
+//  3. Waits for all active requests to complete or timeout
+//  4. Performs standard unregistration and cleanup
+//
+// Draining behavior:
+//   - New requests to the plugin are rejected during draining
+//   - Existing requests are allowed to complete naturally
+//   - If timeout is reached, remaining requests may be cancelled
+//   - Progress callbacks provide visibility into the draining process
+//
+// Parameters:
+//   - pluginName: Name of the plugin to remove gracefully
+//   - drainTimeout: Maximum time to wait for active requests to complete
+//
+// Returns:
+//   - Error if plugin not found, draining fails, or cleanup fails
+//
+// Example:
+//
+//	// Allow up to 30 seconds for requests to complete
+//	err := manager.GracefulUnregister("auth-service", 30*time.Second)
+//	if err != nil {
+//	    log.Printf("Graceful unregistration failed: %v", err)
+//	}
 func (m *Manager[Req, Resp]) GracefulUnregister(pluginName string, drainTimeout time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -365,7 +524,11 @@ func isValidSemanticVersion(version string) bool {
 
 	// Basic semantic version regex pattern
 	semverPattern := `^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$`
-	matched, _ := regexp.MatchString(semverPattern, version)
+	matched, err := regexp.MatchString(semverPattern, version)
+	if err != nil {
+		// If regex fails, assume invalid version
+		return false
+	}
 	return matched
 }
 

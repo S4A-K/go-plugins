@@ -593,11 +593,16 @@ func (dl *DynamicLoader[Req, Resp]) loadPlugin(ctx context.Context, result *Disc
 
 	// Create plugin configuration from manifest
 	config := PluginConfig{
-		Name:      result.Manifest.Name,
-		Type:      string(result.Manifest.Transport), // Convert transport to type
-		Transport: result.Manifest.Transport,
-		Endpoint:  result.Manifest.Endpoint,
-		Version:   result.Manifest.Version, // Add version from manifest
+		Name:       result.Manifest.Name,
+		Type:       string(result.Manifest.Transport), // Convert transport to type
+		Transport:  result.Manifest.Transport,
+		Endpoint:   result.Manifest.Endpoint,
+		Version:    result.Manifest.Version,  // Add version from manifest
+		Executable: result.Manifest.Endpoint, // For executable transport, endpoint is the executable path
+		Args:       result.Manifest.Args,     // Copy args from manifest
+		Env:        result.Manifest.Env,      // Copy env from manifest
+		WorkDir:    result.Manifest.WorkDir,  // Copy work dir from manifest
+		Enabled:    true,                     // Enable discovered plugins by default
 	}
 
 	// Add auth if present

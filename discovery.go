@@ -33,8 +33,8 @@ import (
 //	  "description": "Authentication and authorization service",
 //	  "author": "security-team@company.com",
 //	  "capabilities": ["authenticate", "authorize", "validate-token"],
-//	  "transport": "https",
-//	  "endpoint": "https://auth.internal.company.com/api/v1",
+//	  "transport": "grpc",
+//	  "endpoint": "auth.internal.company.com:9090",
 //	  "requirements": {
 //	    "min_go_version": "1.21",
 //	    "required_plugins": ["logging-service"]
@@ -67,6 +67,11 @@ type PluginManifest struct {
 	Transport TransportType `json:"transport" yaml:"transport" validate:"required"`
 	Endpoint  string        `json:"endpoint" yaml:"endpoint" validate:"required"`
 	Auth      *AuthConfig   `json:"auth,omitempty" yaml:"auth,omitempty"`
+
+	// Executable-specific configuration (for TransportExecutable)
+	Args    []string `json:"args,omitempty" yaml:"args,omitempty"`
+	Env     []string `json:"env,omitempty" yaml:"env,omitempty"`
+	WorkDir string   `json:"work_dir,omitempty" yaml:"work_dir,omitempty"`
 
 	// Plugin requirements and constraints
 	Requirements *PluginRequirements `json:"requirements,omitempty" yaml:"requirements,omitempty"`

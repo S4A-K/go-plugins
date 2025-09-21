@@ -45,7 +45,7 @@ type SubprocessResponse[T any] struct {
 //
 // Key features:
 //   - Direct process execution via exec.Command
-//   - TCP localhost IPC (not Unix sockets)
+//   - TCP localhost IPC communication
 //   - Process lifecycle management via ProcessManager
 //   - Standard subprocess handshake protocol via LifecycleManager
 //   - Configuration parsing via ConfigParser

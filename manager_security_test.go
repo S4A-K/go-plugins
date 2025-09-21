@@ -112,7 +112,10 @@ func TestManager_ShutdownRaceConditions(t *testing.T) {
 		HashAlgorithm: HashAlgorithmSHA256,
 		Plugins:       make(map[string]PluginHashInfo),
 	}
-	whitelistData, _ := json.Marshal(testWhitelist)
+	whitelistData, err := json.Marshal(testWhitelist)
+	if err != nil {
+		t.Fatalf("Failed to marshal whitelist data: %v", err)
+	}
 	if err := os.WriteFile(whitelistFile, whitelistData, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +207,10 @@ func TestManager_SecurityStateManagement(t *testing.T) {
 		HashAlgorithm: HashAlgorithmSHA256,
 		Plugins:       make(map[string]PluginHashInfo),
 	}
-	whitelistData, _ := json.Marshal(testWhitelist)
+	whitelistData, err := json.Marshal(testWhitelist)
+	if err != nil {
+		t.Fatalf("Failed to marshal whitelist data: %v", err)
+	}
 	if err := os.WriteFile(whitelistFile, whitelistData, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +323,10 @@ func TestManager_SecurityValidationBypass(t *testing.T) {
 		HashAlgorithm: HashAlgorithmSHA256,
 		Plugins:       make(map[string]PluginHashInfo), // EMPTY - no authorized plugins
 	}
-	whitelistData, _ := json.Marshal(emptyWhitelist)
+	whitelistData, err := json.Marshal(emptyWhitelist)
+	if err != nil {
+		t.Fatalf("Failed to marshal empty whitelist data: %v", err)
+	}
 	if err := os.WriteFile(whitelistFile, whitelistData, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +459,10 @@ func TestManager_SecurityConcurrentEnableDisable(t *testing.T) {
 		HashAlgorithm: HashAlgorithmSHA256,
 		Plugins:       make(map[string]PluginHashInfo),
 	}
-	whitelistData, _ := json.Marshal(testWhitelist)
+	whitelistData, err := json.Marshal(testWhitelist)
+	if err != nil {
+		t.Fatalf("Failed to marshal whitelist data: %v", err)
+	}
 	if err := os.WriteFile(whitelistFile, whitelistData, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +544,10 @@ func TestManager_PostShutdownStateCheck(t *testing.T) {
 		HashAlgorithm: HashAlgorithmSHA256,
 		Plugins:       make(map[string]PluginHashInfo),
 	}
-	whitelistData, _ := json.Marshal(testWhitelist)
+	whitelistData, err := json.Marshal(testWhitelist)
+	if err != nil {
+		t.Fatalf("Failed to marshal whitelist data: %v", err)
+	}
 	if err := os.WriteFile(whitelistFile, whitelistData, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +587,7 @@ func TestManager_PostShutdownStateCheck(t *testing.T) {
 		HashAlgorithm: HashAlgorithmSHA256,
 	}
 
-	err := manager.EnablePluginSecurity(newSecurityConfig)
+	err = manager.EnablePluginSecurity(newSecurityConfig)
 	if err == nil {
 		t.Error("CRITICAL SHUTDOWN BUG: EnablePluginSecurity succeeded after shutdown - manager should reject all operations")
 	} else {

@@ -348,14 +348,20 @@ func TestHealthChecker_Timeout(t *testing.T) {
 func TestHealthChecker_PeriodicChecking(t *testing.T) {
 	t.Parallel()
 
+	// Use longer intervals on Windows for better timer precision
+	var interval, waitTime time.Duration
 	if runtime.GOOS == "windows" {
-		t.Skip("Skipping periodic checking test on Windows due to timer precision")
+		interval = 100 * time.Millisecond
+		waitTime = 400 * time.Millisecond
+	} else {
+		interval = 50 * time.Millisecond
+		waitTime = 200 * time.Millisecond
 	}
 
 	plugin := NewMockHealthPlugin("periodic-plugin")
 	config := HealthCheckConfig{
 		Enabled:      true,
-		Interval:     50 * time.Millisecond,
+		Interval:     interval,
 		Timeout:      1 * time.Second,
 		FailureLimit: 3,
 	}
@@ -364,7 +370,7 @@ func TestHealthChecker_PeriodicChecking(t *testing.T) {
 	defer checker.Stop()
 
 	// Wait for multiple checks
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(waitTime)
 
 	callCount := plugin.GetCallCount()
 	if callCount < 3 {
@@ -991,15 +997,26 @@ func BenchmarkHealthMonitor_GetOverallHealth(b *testing.B) {
 func TestHealthChecker_Integration(t *testing.T) {
 	t.Parallel()
 
+	// Use longer intervals on Windows for better timer precision
+	interval := 50 * time.Millisecond
+	timeout := 200 * time.Millisecond
+	initialWait := 100 * time.Millisecond
+	failureWait := 150 * time.Millisecond
+	recoveryWait := 100 * time.Millisecond
+
 	if runtime.GOOS == "windows" {
-		t.Skip("Skipping integration test on Windows due to timing sensitivity")
+		interval = 100 * time.Millisecond
+		timeout = 400 * time.Millisecond
+		initialWait = 200 * time.Millisecond
+		failureWait = 300 * time.Millisecond
+		recoveryWait = 200 * time.Millisecond
 	}
 
 	plugin := NewMockHealthPlugin("integration-plugin")
 	config := HealthCheckConfig{
 		Enabled:      true,
-		Interval:     50 * time.Millisecond,
-		Timeout:      200 * time.Millisecond,
+		Interval:     interval,
+		Timeout:      timeout,
 		FailureLimit: 2,
 	}
 
@@ -1007,7 +1024,7 @@ func TestHealthChecker_Integration(t *testing.T) {
 	defer checker.Stop()
 
 	// Wait for initial checks
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(initialWait)
 
 	// Should be healthy initially
 	if checker.GetConsecutiveFailures() != 0 {
@@ -1018,7 +1035,7 @@ func TestHealthChecker_Integration(t *testing.T) {
 	plugin.SetHealth(StatusUnhealthy, "Service down")
 
 	// Wait for failure detection
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(failureWait)
 
 	// Should detect failures
 	if checker.GetConsecutiveFailures() == 0 {
@@ -1029,7 +1046,7 @@ func TestHealthChecker_Integration(t *testing.T) {
 	plugin.SetHealth(StatusHealthy, "Service recovered")
 
 	// Wait for recovery detection
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(recoveryWait)
 
 	// Should reset failure count
 	if checker.GetConsecutiveFailures() != 0 {

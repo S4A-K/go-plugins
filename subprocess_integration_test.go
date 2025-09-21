@@ -81,9 +81,15 @@ func TestSubprocessIntegration_EndToEndCommunication(t *testing.T) {
 		Timestamp: time.Now().Unix(),
 	}
 
+	// Use longer timeout on Windows for subprocess operations
+	timeout := 30 * time.Second
+	if runtime.GOOS == "windows" {
+		timeout = 60 * time.Second
+	}
+
 	execCtx := ExecutionContext{
 		RequestID: "exec-123",
-		Timeout:   30 * time.Second,
+		Timeout:   timeout,
 	}
 
 	response, err := plugin.Execute(ctx, execCtx, request)
@@ -255,9 +261,15 @@ func TestSubprocessIntegration_ErrorRecovery(t *testing.T) {
 			RequestID: fmt.Sprintf("error-%d", i),
 		}
 
+		// Use longer timeout on Windows for subprocess operations
+		timeout := 5 * time.Second
+		if runtime.GOOS == "windows" {
+			timeout = 15 * time.Second
+		}
+
 		execCtx := ExecutionContext{
 			RequestID: fmt.Sprintf("error-exec-%d", i),
-			Timeout:   5 * time.Second,
+			Timeout:   timeout,
 		}
 
 		_, err = plugin.Execute(ctx, execCtx, request)

@@ -395,12 +395,16 @@ func TestRegistryOperations_ConcurrentRegisterUnregister(t *testing.T) {
 				// Register operation
 				pluginName := fmt.Sprintf("dynamic-plugin-%d", index)
 				plugin := createValidTestPlugin(pluginName, "1.0.0")
-				manager.Register(plugin) // Ignore errors for this stress test
+				if err := manager.Register(plugin); err != nil {
+					t.Logf("Registration failed for %s: %v", pluginName, err)
+				}
 			} else {
 				// Unregister operation
 				if index < 20 { // Only unregister initial plugins that exist
 					pluginName := fmt.Sprintf("initial-plugin-%d", index/2)
-					manager.Unregister(pluginName) // Ignore errors for this stress test
+					if err := manager.Unregister(pluginName); err != nil {
+						t.Logf("Unregistration failed for %s: %v", pluginName, err)
+					}
 				}
 			}
 		}(i)

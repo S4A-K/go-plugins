@@ -40,9 +40,7 @@ const (
 	ErrCodePluginConnectionFailed = "PLUGIN_1205"
 
 	// Transport errors (1300-1399)
-	ErrCodeHTTPTransportError = "TRANSPORT_1301"
 	ErrCodeGRPCTransportError = "TRANSPORT_1302"
-
 	ErrCodeExecTransportError = "TRANSPORT_1304"
 
 	// Circuit breaker errors (1400-1499)
@@ -241,13 +239,6 @@ func NewPluginConnectionFailedError(name string, cause error) *errors.Error {
 }
 
 // Transport error constructors
-
-func NewHTTPTransportError(cause error) *errors.Error {
-	return errors.Wrap(cause, ErrCodeHTTPTransportError, "HTTP transport error").
-		WithUserMessage("HTTP transport operation failed").
-		WithSeverity("error").
-		AsRetryable()
-}
 
 func NewGRPCTransportError(cause error) *errors.Error {
 	return errors.Wrap(cause, ErrCodeGRPCTransportError, "gRPC transport error").

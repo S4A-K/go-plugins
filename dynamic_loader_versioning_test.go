@@ -306,8 +306,14 @@ func TestDynamicLoader_VersionSystem_SecurityAndPerformance(t *testing.T) {
 		}
 
 		// Stress test comparison performance
-		v1, _ := ParsePluginVersion("1.2.3")
-		v2, _ := ParsePluginVersion("1.2.4")
+		v1, err := ParsePluginVersion("1.2.3")
+		if err != nil {
+			t.Fatalf("Failed to parse version 1.2.3: %v", err)
+		}
+		v2, err := ParsePluginVersion("1.2.4")
+		if err != nil {
+			t.Fatalf("Failed to parse version 1.2.4: %v", err)
+		}
 
 		for i := 0; i < 10000; i++ {
 			v1.Compare(v2)
@@ -344,7 +350,11 @@ func TestDynamicLoader_VersionSystem_SecurityAndPerformance(t *testing.T) {
 						}
 
 						// Test concurrent comparison operations
-						v2, _ := ParsePluginVersion("1.0.0")
+						v2, err := ParsePluginVersion("1.0.0")
+						if err != nil {
+							errors <- err
+							return
+						}
 						v.Compare(v2)
 						v.SatisfiesConstraint("^1.0.0")
 						v.SatisfiesConstraint("~1.0.0")

@@ -148,7 +148,10 @@ func TestSecurityValidator_HashBypassAttempts(t *testing.T) {
 		},
 	}
 
-	whitelistData, _ := json.Marshal(whitelist)
+	whitelistData, err := json.Marshal(whitelist)
+	if err != nil {
+		t.Fatalf("Failed to marshal whitelist data: %v", err)
+	}
 	if err := os.WriteFile(whitelistFile, whitelistData, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +256,10 @@ func TestSecurityValidator_PolicyBypassLogic(t *testing.T) {
 		HashAlgorithm: HashAlgorithmSHA256,
 		Plugins:       make(map[string]PluginHashInfo),
 	}
-	whitelistData, _ := json.Marshal(emptyWhitelist)
+	whitelistData, err := json.Marshal(emptyWhitelist)
+	if err != nil {
+		t.Fatalf("Failed to marshal empty whitelist data: %v", err)
+	}
 	if err := os.WriteFile(whitelistFile, whitelistData, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +460,10 @@ func TestSecurityValidator_RaceConditionExploits(t *testing.T) {
 			},
 		},
 	}
-	whitelistData, _ := json.Marshal(whitelist)
+	whitelistData, err := json.Marshal(whitelist)
+	if err != nil {
+		t.Fatalf("Failed to marshal whitelist data: %v", err)
+	}
 	if err := os.WriteFile(whitelistFile, whitelistData, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +582,10 @@ func TestSecurityValidator_ResourceExhaustionAttacks(t *testing.T) {
 			},
 		},
 	}
-	whitelistData, _ := json.Marshal(whitelist)
+	whitelistData, err := json.Marshal(whitelist)
+	if err != nil {
+		t.Fatalf("Failed to marshal whitelist data: %v", err)
+	}
 	if err := os.WriteFile(whitelistFile, whitelistData, 0644); err != nil {
 		t.Fatal(err)
 	}

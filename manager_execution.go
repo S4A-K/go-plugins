@@ -15,7 +15,37 @@ import (
 
 // Plugin Execution Methods
 
-// Execute implements PluginManager.Execute
+// Execute implements PluginManager.Execute.
+// This method executes a plugin request with default execution context settings,
+// providing a simplified interface for common plugin execution scenarios.
+//
+// The method automatically creates an execution context with sensible defaults:
+//   - 30-second timeout
+//   - 3 retry attempts
+//   - Auto-generated request ID for tracing
+//
+// Features provided:
+//   - Circuit breaker protection against failing plugins
+//   - Request tracking for graceful shutdown coordination
+//   - Comprehensive metrics collection and observability
+//   - Distributed tracing support when configured
+//   - Automatic retry logic with exponential backoff
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout control
+//   - pluginName: Name of the plugin to execute (must be registered)
+//   - request: Request data to send to the plugin
+//
+// Returns:
+//   - Response from the plugin
+//   - Error if execution fails, plugin not found, circuit breaker open, or timeout
+//
+// Example:
+//
+//	response, err := manager.Execute(ctx, "auth-service", authRequest)
+//	if err != nil {
+//	    log.Printf("Plugin execution failed: %v", err)
+//	}
 func (m *Manager[Req, Resp]) Execute(ctx context.Context, pluginName string, request Req) (Resp, error) {
 	execCtx := ExecutionContext{
 		RequestID:  generateRequestID(),
@@ -25,7 +55,46 @@ func (m *Manager[Req, Resp]) Execute(ctx context.Context, pluginName string, req
 	return m.ExecuteWithOptions(ctx, pluginName, execCtx, request)
 }
 
-// ExecuteWithOptions implements PluginManager.ExecuteWithOptions
+// ExecuteWithOptions implements PluginManager.ExecuteWithOptions.
+// This method provides fine-grained control over plugin execution with custom
+// execution context settings, allowing for advanced scenarios and custom configurations.
+//
+// Advanced features:
+//   - Custom timeout and retry configuration
+//   - Request ID for correlation and tracing
+//   - Custom headers for transport-specific metadata
+//   - Plugin-specific metadata for context passing
+//   - Circuit breaker integration with failure tracking
+//   - Request tracking for graceful draining during shutdown
+//
+// Execution flow:
+//  1. Validates manager state and tracks request for graceful shutdown
+//  2. Sets up observability tracking and distributed tracing
+//  3. Retrieves plugin and checks circuit breaker status
+//  4. Executes plugin with retry logic and timeout handling
+//  5. Records metrics and observability data
+//  6. Returns response or detailed error information
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout control
+//   - pluginName: Name of the plugin to execute (must be registered)
+//   - execCtx: Execution context with custom timeout, retries, headers, and metadata
+//   - request: Request data to send to the plugin
+//
+// Returns:
+//   - Response from the plugin
+//   - Error with specific error types for different failure scenarios
+//
+// Example:
+//
+//	execCtx := ExecutionContext{
+//	    RequestID:  "req-12345",
+//	    Timeout:    45 * time.Second,
+//	    MaxRetries: 5,
+//	    Headers:    map[string]string{"Authorization": "Bearer token"},
+//	    Metadata:   map[string]string{"user_id": "user123"},
+//	}
+//	response, err := manager.ExecuteWithOptions(ctx, "payment-service", execCtx, paymentRequest)
 func (m *Manager[Req, Resp]) ExecuteWithOptions(ctx context.Context, pluginName string, execCtx ExecutionContext, request Req) (Resp, error) {
 	var zero Resp
 

@@ -1,18 +1,20 @@
 // Package goplugins provides a production-ready, type-safe plugin architecture
-// for Go applications. It supports multiple transport protocols (HTTP, gRPC, Unix sockets)
+// for Go applications. It supports gRPC and subprocess transport protocols
 // with built-in circuit breaking, health monitoring, authentication, and graceful degradation.
 //
 // Key Features:
 //   - Type-safe plugin interfaces using Go generics
-//   - Multiple transport protocols (HTTP, gRPC, Unix sockets)
+//   - Multiple transport protocols (gRPC, subprocess execution)
 //   - Circuit breaker pattern for resilience
 //   - Health monitoring and automatic recovery
-//   - Authentication and authorization
+//   - Authentication and authorization (API key, Bearer, mTLS, Basic, Custom)
+//   - Advanced security system with plugin whitelisting and hash validation
 //   - Hot-reloading of plugin configurations with active request monitoring
-//   - Production-grade graceful draining (no more time.Sleep!)
+//   - Production-grade graceful draining with atomic request tracking
 //   - Pluggable logging system supporting any framework
-//   - Comprehensive observability with metrics exporters
-//   - Graceful shutdown with proper cleanup
+//   - Comprehensive observability with metrics exporters and distributed tracing
+//   - Zero-downtime deployments and graceful shutdown
+//   - Simple API with fluent builder pattern for common use cases
 //
 // Basic Usage:
 //
@@ -26,17 +28,32 @@
 //		Error string `json:"error,omitempty"`
 //	}
 //
-//	// Create a plugin manager
-//	manager := goplugins.NewManager[KeyRequest, KeyResponse]()
-//
-//	// Load plugins from configuration
-//	err := manager.LoadFromConfig("plugins.yaml")
+//	// Simple API - Recommended for most use cases
+//	manager, err := goplugins.Production[KeyRequest, KeyResponse]().
+//		WithPlugin("vault-provider", goplugins.Subprocess("./vault-plugin")).
+//		WithSecurity("./plugins.whitelist").
+//		WithMetrics().
+//		Build()
 //	if err != nil {
 //		log.Fatal(err)
 //	}
+//	defer manager.Shutdown(context.Background())
 //
 //	// Execute plugin operations
 //	resp, err := manager.Execute(ctx, "vault-provider", KeyRequest{KeyID: "master"})
+//
+//	// Advanced API - For complex configurations
+//	manager := goplugins.NewManager[KeyRequest, KeyResponse](logger)
+//	config := goplugins.GetDefaultManagerConfig()
+//	config.Plugins = []goplugins.PluginConfig{
+//		{
+//			Name:      "vault-provider",
+//			Transport: goplugins.TransportExecutable,
+//			Executable: "./vault-plugin",
+//			Auth:      goplugins.AuthConfig{Method: goplugins.AuthAPIKey, APIKey: "secret"},
+//		},
+//	}
+//	err = manager.LoadFromConfig(config)
 //
 // Active Request Monitoring:
 // The library includes a sophisticated request tracking system that enables true zero-downtime
@@ -51,9 +68,16 @@
 // This eliminates the need for fixed timeout delays and provides precise control over
 // graceful operations during hot reloads, plugin updates, and system shutdowns.
 //
-// Security:
-// The library implements multiple security layers including mTLS for transport security,
-// API key authentication, request validation, rate limiting, and comprehensive audit logging.
+// Security System:
+// The library implements a comprehensive security system with multiple layers:
+//
+//   - Plugin Whitelisting: SHA256 hash validation of plugin binaries
+//   - Security Policies: Strict, Permissive, and Audit modes
+//   - Authentication: mTLS, API key, Bearer token, Basic, and Custom methods
+//   - Audit Logging: Comprehensive security event logging with rotation
+//   - Path Traversal Protection: Prevents malicious path manipulation
+//   - Hot-reload: Security configuration updates without restart
+//   - Process Isolation: Subprocess plugins run in isolated processes
 //
 // Performance:
 // Built-in connection pooling, intelligent caching, circuit breakers, optimized

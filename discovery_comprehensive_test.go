@@ -107,7 +107,11 @@ func TestDiscoveryEngine_CoreFunctionality(t *testing.T) {
 	t.Run("ManifestParsing_JSONAndYAML", func(t *testing.T) {
 		// Test: Engine should parse both JSON and YAML manifests correctly
 		tempDir := createTempDirectory(t)
-		defer os.RemoveAll(tempDir)
+		defer func() {
+			if err := os.RemoveAll(tempDir); err != nil {
+				t.Logf("Failed to remove temp directory %s: %v", tempDir, err)
+			}
+		}()
 
 		// Create valid JSON manifest
 		jsonManifest := createValidManifest("json-plugin", "1.0.0")
@@ -172,7 +176,11 @@ func TestDiscoveryEngine_SecurityValidation(t *testing.T) {
 	t.Run("PathTraversalPrevention_RelativePaths", func(t *testing.T) {
 		// Test: Engine should prevent directory traversal attacks
 		tempDir := createTempDirectory(t)
-		defer os.RemoveAll(tempDir)
+		defer func() {
+			if err := os.RemoveAll(tempDir); err != nil {
+				t.Logf("Failed to remove temp directory %s: %v", tempDir, err)
+			}
+		}()
 
 		// Create malicious manifest with path traversal attempt
 		maliciousDir := filepath.Join(tempDir, "malicious")
@@ -215,7 +223,11 @@ func TestDiscoveryEngine_SecurityValidation(t *testing.T) {
 	t.Run("DirectoryPermissionHandling_RestrictedAccess", func(t *testing.T) {
 		// Test: Engine should handle permission denied scenarios gracefully
 		tempDir := createTempDirectory(t)
-		defer os.RemoveAll(tempDir)
+		defer func() {
+			if err := os.RemoveAll(tempDir); err != nil {
+				t.Logf("Failed to remove temp directory %s: %v", tempDir, err)
+			}
+		}()
 
 		// Create restricted directory (if possible on current system)
 		restrictedDir := filepath.Join(tempDir, "restricted")
@@ -246,7 +258,11 @@ func TestDiscoveryEngine_SecurityValidation(t *testing.T) {
 	t.Run("MalformedManifestHandling_CorruptedData", func(t *testing.T) {
 		// Test: Engine should handle corrupted manifest files safely
 		tempDir := createTempDirectory(t)
-		defer os.RemoveAll(tempDir)
+		defer func() {
+			if err := os.RemoveAll(tempDir); err != nil {
+				t.Logf("Failed to remove temp directory %s: %v", tempDir, err)
+			}
+		}()
 
 		// Create various types of corrupted manifests
 		testCases := map[string]string{
@@ -304,7 +320,11 @@ func TestDiscoveryEngine_DirectoryStructures(t *testing.T) {
 	t.Run("MultiLevelDirectoryScanning_WithDepthLimits", func(t *testing.T) {
 		// Test: Engine should respect MaxDepth configuration
 		tempDir := createTempDirectory(t)
-		defer os.RemoveAll(tempDir)
+		defer func() {
+			if err := os.RemoveAll(tempDir); err != nil {
+				t.Logf("Failed to remove temp directory %s: %v", tempDir, err)
+			}
+		}()
 
 		// Create nested directory structure: level1/level2/level3/level4/level5
 		deepPath := tempDir
@@ -312,7 +332,9 @@ func TestDiscoveryEngine_DirectoryStructures(t *testing.T) {
 
 		for depth := 1; depth <= 5; depth++ {
 			deepPath = filepath.Join(deepPath, fmt.Sprintf("level%d", depth))
-			os.MkdirAll(deepPath, 0755)
+			if err := os.MkdirAll(deepPath, 0755); err != nil {
+				t.Fatalf("Failed to create deep path %s: %v", deepPath, err)
+			}
 
 			// Create plugin at each level
 			manifest := createValidManifest(fmt.Sprintf("plugin-depth-%d", depth), "1.0.0")
@@ -356,7 +378,11 @@ func TestDiscoveryEngine_DirectoryStructures(t *testing.T) {
 	t.Run("ExcludePathsFiltering_IgnoreDirectories", func(t *testing.T) {
 		// Test: Engine should respect ExcludePaths configuration
 		tempDir := createTempDirectory(t)
-		defer os.RemoveAll(tempDir)
+		defer func() {
+			if err := os.RemoveAll(tempDir); err != nil {
+				t.Logf("Failed to remove temp directory %s: %v", tempDir, err)
+			}
+		}()
 
 		// Create directory structure with included and excluded paths
 		includedDir := filepath.Join(tempDir, "included")
@@ -364,7 +390,9 @@ func TestDiscoveryEngine_DirectoryStructures(t *testing.T) {
 		hiddenDir := filepath.Join(tempDir, ".hidden")
 
 		for _, dir := range []string{includedDir, excludedDir, hiddenDir} {
-			os.MkdirAll(dir, 0755)
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatalf("Failed to create directory %s: %v", dir, err)
+			}
 
 			// Create plugin in each directory
 			pluginName := filepath.Base(dir) + "-plugin"
@@ -408,12 +436,18 @@ func TestDiscoveryEngine_ErrorHandling(t *testing.T) {
 	t.Run("ConcurrentDiscoveryOperations_ThreadSafety", func(t *testing.T) {
 		// Test: Engine should handle concurrent operations safely
 		tempDir := createTempDirectory(t)
-		defer os.RemoveAll(tempDir)
+		defer func() {
+			if err := os.RemoveAll(tempDir); err != nil {
+				t.Logf("Failed to remove temp directory %s: %v", tempDir, err)
+			}
+		}()
 
 		// Create multiple plugins
 		for i := 0; i < 10; i++ {
 			pluginDir := filepath.Join(tempDir, fmt.Sprintf("plugin%d", i))
-			os.MkdirAll(pluginDir, 0755)
+			if err := os.MkdirAll(pluginDir, 0755); err != nil {
+				t.Fatalf("Failed to create plugin directory %s: %v", pluginDir, err)
+			}
 
 			manifest := createValidManifest(fmt.Sprintf("concurrent-plugin-%d", i), "1.0.0")
 			pluginPath := filepath.Join(pluginDir, "plugin.json")
@@ -464,7 +498,11 @@ func TestDiscoveryEngine_ErrorHandling(t *testing.T) {
 	t.Run("DiscoveryTimeout_ContextCancellation", func(t *testing.T) {
 		// Test: Engine should respect context timeout
 		tempDir := createTempDirectory(t)
-		defer os.RemoveAll(tempDir)
+		defer func() {
+			if err := os.RemoveAll(tempDir); err != nil {
+				t.Logf("Failed to remove temp directory %s: %v", tempDir, err)
+			}
+		}()
 
 		// Create plugin
 		manifest := createValidManifest("timeout-plugin", "1.0.0")
@@ -501,7 +539,11 @@ func TestDiscoveryEngine_Integration(t *testing.T) {
 	t.Run("MultiplePluginTypesDiscovery_RealWorldScenario", func(t *testing.T) {
 		// Test: Engine should discover various plugin types correctly
 		tempDir := createTempDirectory(t)
-		defer os.RemoveAll(tempDir)
+		defer func() {
+			if err := os.RemoveAll(tempDir); err != nil {
+				t.Logf("Failed to remove temp directory %s: %v", tempDir, err)
+			}
+		}()
 
 		// Create plugins with different transports and capabilities
 		plugins := []struct {
@@ -517,7 +559,9 @@ func TestDiscoveryEngine_Integration(t *testing.T) {
 
 		for _, plugin := range plugins {
 			pluginDir := filepath.Join(tempDir, plugin.name)
-			os.MkdirAll(pluginDir, 0755)
+			if err := os.MkdirAll(pluginDir, 0755); err != nil {
+				t.Fatalf("Failed to create plugin directory %s: %v", pluginDir, err)
+			}
 
 			manifest := PluginManifest{
 				Name:         plugin.name,
@@ -573,7 +617,11 @@ func TestDiscoveryEngine_Integration(t *testing.T) {
 	t.Run("EventNotificationWorkflow_DiscoveryEvents", func(t *testing.T) {
 		// Test: Engine should emit discovery events correctly
 		tempDir := createTempDirectory(t)
-		defer os.RemoveAll(tempDir)
+		defer func() {
+			if err := os.RemoveAll(tempDir); err != nil {
+				t.Logf("Failed to remove temp directory %s: %v", tempDir, err)
+			}
+		}()
 
 		// Create plugin
 		manifest := createValidManifest("event-plugin", "1.0.0")

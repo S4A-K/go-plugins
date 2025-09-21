@@ -218,8 +218,12 @@ func TestLibraryConfigIntegration_PerformanceUnderLoad(t *testing.T) {
 		t.Skip("Skipping performance test in short mode")
 	}
 
+	// Use longer intervals on Windows for better file watcher performance
+	updateInterval := 10 * time.Millisecond
+	totalDuration := 2 * time.Second
 	if runtime.GOOS == "windows" {
-		t.Skip("Skipping performance test on Windows due to file watcher timing limitations")
+		updateInterval = 50 * time.Millisecond
+		totalDuration = 5 * time.Second
 	}
 
 	// Setup performance test environment
@@ -276,12 +280,12 @@ func TestLibraryConfigIntegration_PerformanceUnderLoad(t *testing.T) {
 			}
 
 			// Brief pause to allow processing
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(updateInterval)
 		}
 
 		// Wait for final change to be processed
 		finalVersion := fmt.Sprintf("v1.%d.0", numChanges)
-		if err := waitForConfigVersionChange(watcher, "v1.0.0", 10*time.Second); err != nil {
+		if err := waitForConfigVersionChange(watcher, "v1.0.0", totalDuration*2); err != nil {
 			t.Fatalf("Final configuration change not detected: %v", err)
 		}
 

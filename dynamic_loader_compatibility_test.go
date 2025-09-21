@@ -515,7 +515,9 @@ func TestVersionCompatibility_ConcurrencyStress(t *testing.T) {
 						},
 					}
 
-					loader.validateVersionCompatibility(manifest)
+					if err := loader.validateVersionCompatibility(manifest); err != nil {
+						t.Logf("Version validation failed for test %d: %v", i, err)
+					}
 				}
 			}
 		}(i)
@@ -557,7 +559,9 @@ func TestVersionCompatibility_PerformanceBenchmark(t *testing.T) {
 			Endpoint:  "localhost:50051",
 		}
 
-		loader.validateVersionCompatibility(manifest)
+		if err := loader.validateVersionCompatibility(manifest); err != nil {
+			t.Logf("Version validation failed: %v", err)
+		}
 	}
 
 	elapsed := time.Since(start)

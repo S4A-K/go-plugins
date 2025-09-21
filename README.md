@@ -14,12 +14,14 @@ go-plugins is a production-ready, type-safe plugin architecture for Go applicati
 
 ## Features
 
+- **Simplified API**: Ultra-simple fluent interface for common use cases (3 lines vs 15+ lines)
+- **Smart Presets**: Development/Production presets with optimal defaults and automatic logging
+- **Auto-Discovery**: Convention-over-configuration plugin discovery with filtering
 - **Type Safety**: Generics-based architecture with compile-time type safety for requests/responses
 - **Subprocess Execution**: Primary transport via isolated process execution for security and reliability  
 - **Circuit Breaker**: Automatic failure detection and recovery with configurable thresholds
 - **Health Monitoring**: Continuous health checks with automatic status tracking and recovery
 - **Security System**: Hash-based plugin whitelist with SHA-256 validation and audit trails
-- **Auto-Discovery**: Intelligent filesystem plugin detection with manifest validation
 - **Hot Reload**: Ultra-fast configuration reloading powered by [Argus](https://github.com/agilira/argus)
 - **Observability**: Built-in metrics collection and structured logging
 - **Pluggable Logging**: Interface-based logging supporting any framework (zap, logrus, zerolog, custom)
@@ -38,6 +40,89 @@ go-plugins supports the latest two minor versions of Go (currently Go 1.24+ and 
 ```bash
 go get github.com/agilira/go-plugins
 ```
+
+## Simplified API (New!)
+
+go-plugins now offers a simplified API for common use cases, Choose the approach that fits your needs:
+
+### Ultra-Simple Setup
+
+```go
+// Before: 15+ lines of boilerplate
+// After: 3 lines to get started!
+
+manager, err := goplugins.Simple[AuthRequest, AuthResponse]().
+    WithPlugin("auth-service", goplugins.Subprocess("./auth-plugin")).
+    Build()
+```
+
+### Environment Presets
+
+**Development Mode** (with automatic logging):
+```go
+manager, err := goplugins.Development[AuthRequest, AuthResponse]().
+    WithPlugin("auth-service", goplugins.Subprocess("./auth-plugin")).
+    Build()
+// Output: [go-plugins] [INFO] Development preset initialized
+```
+
+**Production Mode** (optimized defaults):
+```go
+manager, err := goplugins.Production[AuthRequest, AuthResponse]().
+    WithPlugin("api-gateway", goplugins.GRPC("gateway:443")).
+    WithSecurity("./whitelist.json").
+    WithMetrics().
+    Build()
+```
+
+### Auto-Discovery
+
+**Convention over Configuration**:
+```go
+// Automatically discover all plugins in directory
+manager, err := goplugins.Auto[Request, Response]().
+    FromDirectory("./plugins").
+    WithDefaults().
+    Build()
+
+// Advanced auto-discovery with filters
+manager, err := goplugins.Auto[Request, Response]().
+    FromDirectories([]string{"./plugins", "./extensions"}).
+    WithPattern("*-plugin").
+    WithMaxDepth(3).
+    WithFilter(func(manifest *goplugins.PluginManifest) bool {
+        return manifest.Name != "disabled-plugin"
+    }).
+    WithDefaults().
+    Build()
+```
+
+### Fluent Interface
+
+**Chain multiple configurations**:
+```go
+manager, err := goplugins.Simple[Request, Response]().
+    WithLogger(customLogger).
+    WithTimeout(30 * time.Second).
+    WithPlugin("auth", goplugins.Subprocess("./auth")).
+    WithPlugin("cache", goplugins.HTTP("http://cache:8080")).
+    WithPlugin("db", goplugins.GRPC("db-service:443")).
+    WithSecurity("./security.json").
+    WithMetrics().
+    Build()
+```
+
+### API Comparison
+
+| Task | Traditional API | Simplified API |
+|------|-----------------|----------------|
+| Basic setup | 15+ lines | 3 lines |
+| Add logging | Custom Logger impl | `Development()` preset |
+| Multiple plugins | Manual factory registration | Fluent chaining |
+| Auto-discovery | Manual DiscoveryEngine setup | `Auto().FromDirectory()` |
+| Production config | Complex ManagerConfig | `Production().WithSecurity()` |
+
+> **Tip**: The simplified API is perfect for 80% of use cases. For advanced scenarios, the full traditional API remains available.
 
 ### Basic Example
 
@@ -264,7 +349,30 @@ Comprehensive documentation is available in the [docs](./docs/) folder:
 
 ---
 
-**Documentation**: [docs/](./docs/) | **Examples**: [examples/](./examples/)
+**Documentation**: [docs/](./docs/) | **Examples**: [examples/](./examples/) | **[🚀 New Simplified API](#-simplified-api-new)**
+
+## What's New
+
+### v2.1.0 - Simplified API Revolution 🚀
+
+We've dramatically simplified go-plugins while maintaining 100% backward compatibility:
+
+- **3-line setup** instead of 15+ lines of boilerplate
+- **Smart presets** for Development/Production with optimal defaults
+- **Auto-discovery** with convention-over-configuration
+- **Built-in logger** for out-of-the-box development experience
+- **Fluent interface** for readable, chainable configuration
+
+```go
+// New: Ultra-simple setup
+manager, err := goplugins.Simple[Request, Response]().
+    WithPlugin("service", goplugins.Subprocess("./service")).
+    Build()
+
+// Old API still works unchanged!
+manager := goplugins.NewManager[Request, Response](logger)
+// ... existing code continues to work
+```
 
 ## License
 

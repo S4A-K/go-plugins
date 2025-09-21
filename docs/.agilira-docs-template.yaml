@@ -1,0 +1,175 @@
+# AGILira Documentation Template Configuration
+# This file defines the standard documentation structure for all AGILira projects
+
+template_version: "1.0.0"
+created_by: "AGILira Documentation Team"
+last_updated: "2025-01-21"
+
+# Project-specific configuration (to be customized per project)
+project:
+  name: "go-plugins"
+  type: "go-library"  # go-library, go-service, js-library, python-package, etc.
+  repository: "https://github.com/agilira/go-plugins"
+  license: "MPL-2.0"
+  main_branch: "main"
+
+# Documentation structure (standard across all projects)
+structure:
+  # Required sections for all projects
+  required_sections:
+    - name: "Quick Start"
+      path: "guides/quick-start.md"
+      description: "Get started quickly with basic examples"
+      
+    - name: "Configuration"
+      path: "guides/configuration.md"
+      description: "Complete configuration reference"
+      
+    - name: "API Reference"
+      path: "api/_index.md"
+      description: "Auto-generated API documentation"
+      auto_generated: true
+      
+    - name: "Examples"
+      path: "examples/_index.md"
+      description: "Practical examples and tutorials"
+
+  # Library-specific sections (for Go libraries)
+  go_library_sections:
+    - name: "Plugin Development"
+      path: "guides/plugin-development.md"
+      description: "How to develop plugins"
+      
+    - name: "Security System"
+      path: "guides/security.md"
+      description: "Security features and best practices"
+      
+    - name: "Production Deployment"
+      path: "guides/production.md"
+      description: "Production deployment guidelines"
+
+  # Service-specific sections (for Go services)
+  go_service_sections:
+    - name: "Deployment"
+      path: "guides/deployment.md"
+      description: "Service deployment and operations"
+      
+    - name: "Monitoring"
+      path: "guides/monitoring.md"
+      description: "Monitoring and observability"
+
+# Automation configuration
+automation:
+  # What gets auto-updated
+  auto_update:
+    - "API Reference from GoDoc comments"
+    - "Version numbers from git tags"
+    - "Package import paths"
+    - "License headers"
+    
+  # What gets validated
+  validation:
+    - "Go code examples compilation"
+    - "Internal link consistency"
+    - "Markdown syntax"
+    - "Hugo configuration"
+    
+  # Quality checks
+  quality_checks:
+    - "Spell checking (disabled by default)"
+    - "Grammar checking (disabled by default)"
+    - "Link validation"
+    - "Code example testing"
+
+# Hugo theme configuration (standard for all projects)
+hugo:
+  theme: "docsy"
+  version: "0.8.0"
+  required_features:
+    - "syntax_highlighting"
+    - "search"
+    - "responsive_design"
+    - "mobile_navigation"
+    - "edit_links"
+
+# GitHub Actions workflow configuration
+github_actions:
+  triggers:
+    - "push to main branch"
+    - "changes to *.go files"
+    - "changes to docs/** files"
+    - "pull requests to main"
+    
+  jobs:
+    - name: "build"
+      description: "Generate documentation and build Hugo site"
+      
+    - name: "deploy"
+      description: "Deploy to GitHub Pages"
+      condition: "main branch only"
+
+# Standards and conventions
+standards:
+  # File naming conventions
+  file_naming:
+    guides: "kebab-case.md"
+    examples: "kebab-case.md"
+    api: "_index.md"
+    
+  # Content structure
+  content_structure:
+    guide_sections:
+      - "Overview"
+      - "Quick Start"
+      - "Configuration"
+      - "Examples"
+      - "Best Practices"
+      - "Troubleshooting"
+      - "Next Steps"
+      
+    example_sections:
+      - "Overview"
+      - "Prerequisites"
+      - "Implementation"
+      - "Running the Example"
+      - "Expected Output"
+      - "Key Concepts"
+      - "Next Steps"
+
+# Reusable components
+components:
+  # Standard alert boxes
+  alerts:
+    security: "Security Note"
+    performance: "Performance Note"
+    tip: "Tip"
+    warning: "Warning"
+    
+  # Standard card layouts
+  cards:
+    feature_grid: "3-column feature cards"
+    guide_grid: "2-column guide cards"
+    example_grid: "3-column example cards"
+
+# Quality metrics
+quality_metrics:
+  # Target metrics for documentation quality
+  targets:
+    api_coverage: "100%"  # All public APIs documented
+    example_coverage: "80%"  # 80% of features have examples
+    link_accuracy: "100%"  # No broken internal links
+    code_accuracy: "100%"  # All code examples compile
+
+# Future enhancements
+future_enhancements:
+  planned:
+    - "Automated screenshot generation"
+    - "Interactive code examples"
+    - "Multi-language support"
+    - "PDF generation"
+    - "Offline documentation"
+    
+  experimental:
+    - "AI-powered documentation suggestions"
+    - "Automatic example generation from tests"
+    - "Documentation analytics"

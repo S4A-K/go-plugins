@@ -38,7 +38,7 @@ const (
 //   - AuthNone: No authentication required
 //   - AuthAPIKey: API key-based authentication via X-API-Key header
 //   - AuthBearer: Bearer token authentication via Authorization header
-//   - AuthBasic: HTTP Basic authentication with username/password
+//   - AuthBasic: Basic authentication with username/password
 //   - AuthMTLS: Mutual TLS authentication using client certificates
 //   - AuthCustom: Custom authentication method with user-defined headers
 //
@@ -466,7 +466,7 @@ func (pc *PluginConfig) validateNetworkTransport() error {
 		return nil
 	}
 
-	// For HTTP/HTTPS, validate endpoint URL
+	// For network transports, validate endpoint URL
 	parsed, err := url.Parse(pc.Endpoint)
 	if err != nil {
 		return NewInvalidEndpointURLError(pc.Endpoint, err)
@@ -660,27 +660,32 @@ func (mc *ManagerConfig) FromJSON(data []byte) error {
 	return mc.Validate()
 }
 
-// GetDefaultManagerConfig returns a ManagerConfig with sensible production-ready defaults.
-//
-// This function provides a baseline configuration suitable for most production
-// environments. The defaults are chosen to balance reliability, performance,
-// and resource usage. Users can customize specific settings as needed.
+// GetDefaultManagerConfig returns a ManagerConfig with sensible production defaults.
+// This function provides a complete configuration template that can be used as-is
+// for most applications or customized for specific needs.
 //
 // Default configuration includes:
-//   - Info-level logging with metrics on port 9090
-//   - Conservative retry policy with exponential backoff
-//   - Circuit breaker enabled with reasonable thresholds
-//   - Health checking enabled with 30-second intervals
-//   - Connection pooling with moderate limits
+//   - Info-level logging for balanced verbosity
+//   - Metrics server on port 9090
+//   - Exponential backoff retry with jitter (3 attempts, 100ms to 5s)
+//   - Circuit breaker with 5-failure threshold and 30s recovery
+//   - Health checks every 30 seconds with 5s timeout
+//   - Connection pooling with reasonable limits
 //   - Rate limiting disabled by default
 //
-// Usage:
+// Returns:
+//
+//	ManagerConfig with production-ready default values
+//
+// Example usage:
 //
 //	config := GetDefaultManagerConfig()
 //	config.LogLevel = "debug"  // Customize as needed
 //	config.Plugins = []PluginConfig{
 //	    // Add your plugins here
 //	}
+//	manager := NewManager[MyRequest, MyResponse](logger)
+//	err := manager.LoadFromConfig(config)
 func GetDefaultManagerConfig() ManagerConfig {
 	return ManagerConfig{
 		LogLevel:    "info",

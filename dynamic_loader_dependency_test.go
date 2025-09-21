@@ -115,9 +115,15 @@ func TestDynamicLoader_DependencyGraph_CoreFunctionality(t *testing.T) {
 			}},
 			{"RemovePlugin_IntegrityCheck", func(t *testing.T, dg *DependencyGraph) {
 				// Build graph: A -> B -> C
-				dg.AddPlugin("plugin-c", []string{})
-				dg.AddPlugin("plugin-b", []string{"plugin-c"})
-				dg.AddPlugin("plugin-a", []string{"plugin-b"})
+				if err := dg.AddPlugin("plugin-c", []string{}); err != nil {
+					t.Fatalf("Failed to add plugin-c: %v", err)
+				}
+				if err := dg.AddPlugin("plugin-b", []string{"plugin-c"}); err != nil {
+					t.Fatalf("Failed to add plugin-b: %v", err)
+				}
+				if err := dg.AddPlugin("plugin-a", []string{"plugin-b"}); err != nil {
+					t.Fatalf("Failed to add plugin-a: %v", err)
+				}
 
 				// Remove middle plugin
 				dg.RemovePlugin("plugin-b")
@@ -157,10 +163,15 @@ func TestDynamicLoader_DependencyGraph_CoreFunctionality(t *testing.T) {
 				"DiamondDependency",
 				func(dg *DependencyGraph) {
 					// D -> B, D -> C, B -> A, C -> A (diamond shape)
-					dg.AddPlugin("plugin-a", []string{})
-					dg.AddPlugin("plugin-b", []string{"plugin-a"})
-					dg.AddPlugin("plugin-c", []string{"plugin-a"})
-					dg.AddPlugin("plugin-d", []string{"plugin-b", "plugin-c"})
+					addPluginOrFail := func(name string, deps []string) {
+						if err := dg.AddPlugin(name, deps); err != nil {
+							panic(fmt.Sprintf("Failed to add plugin %s: %v", name, err))
+						}
+					}
+					addPluginOrFail("plugin-a", []string{})
+					addPluginOrFail("plugin-b", []string{"plugin-a"})
+					addPluginOrFail("plugin-c", []string{"plugin-a"})
+					addPluginOrFail("plugin-d", []string{"plugin-b", "plugin-c"})
 				},
 				[]string{"plugin-a"}, // A must be first
 				false,
@@ -169,12 +180,17 @@ func TestDynamicLoader_DependencyGraph_CoreFunctionality(t *testing.T) {
 				"ComplexDAG_MultiLevel",
 				func(dg *DependencyGraph) {
 					// Complex: F -> D,E; D -> B; E -> C; B,C -> A
-					dg.AddPlugin("plugin-a", []string{})
-					dg.AddPlugin("plugin-b", []string{"plugin-a"})
-					dg.AddPlugin("plugin-c", []string{"plugin-a"})
-					dg.AddPlugin("plugin-d", []string{"plugin-b"})
-					dg.AddPlugin("plugin-e", []string{"plugin-c"})
-					dg.AddPlugin("plugin-f", []string{"plugin-d", "plugin-e"})
+					addPluginOrFail := func(name string, deps []string) {
+						if err := dg.AddPlugin(name, deps); err != nil {
+							panic(fmt.Sprintf("Failed to add plugin %s: %v", name, err))
+						}
+					}
+					addPluginOrFail("plugin-a", []string{})
+					addPluginOrFail("plugin-b", []string{"plugin-a"})
+					addPluginOrFail("plugin-c", []string{"plugin-a"})
+					addPluginOrFail("plugin-d", []string{"plugin-b"})
+					addPluginOrFail("plugin-e", []string{"plugin-c"})
+					addPluginOrFail("plugin-f", []string{"plugin-d", "plugin-e"})
 				},
 				[]string{"plugin-a"}, // A must be first
 				false,
@@ -183,13 +199,18 @@ func TestDynamicLoader_DependencyGraph_CoreFunctionality(t *testing.T) {
 				"LargeGraph_Performance",
 				func(dg *DependencyGraph) {
 					// Create large linear chain for performance testing
+					addPluginOrFail := func(name string, deps []string) {
+						if err := dg.AddPlugin(name, deps); err != nil {
+							panic(fmt.Sprintf("Failed to add plugin %s: %v", name, err))
+						}
+					}
 					for i := 0; i < 100; i++ {
 						name := fmt.Sprintf("plugin-%03d", i)
 						if i == 0 {
-							dg.AddPlugin(name, []string{})
+							addPluginOrFail(name, []string{})
 						} else {
 							prev := fmt.Sprintf("plugin-%03d", i-1)
-							dg.AddPlugin(name, []string{prev})
+							addPluginOrFail(name, []string{prev})
 						}
 					}
 				},
@@ -244,24 +265,24 @@ func TestDynamicLoader_DependencyGraph_EdgeCasesAndBugs(t *testing.T) {
 			{
 				"SimpleCircle_TwoNodes",
 				func(dg *DependencyGraph) {
-					dg.AddPlugin("plugin-a", []string{"plugin-b"})
-					dg.AddPlugin("plugin-b", []string{"plugin-a"})
+					_ = dg.AddPlugin("plugin-a", []string{"plugin-b"}) // Ignore error in circular test
+					_ = dg.AddPlugin("plugin-b", []string{"plugin-a"}) // Ignore error in circular test
 				},
 				"A -> B -> A",
 			},
 			{
 				"SelfLoop_SingleNode",
 				func(dg *DependencyGraph) {
-					dg.AddPlugin("plugin-a", []string{"plugin-a"})
+					_ = dg.AddPlugin("plugin-a", []string{"plugin-a"}) // Ignore error in self-loop test
 				},
 				"A -> A",
 			},
 			{
 				"ThreeNodeCycle",
 				func(dg *DependencyGraph) {
-					dg.AddPlugin("plugin-a", []string{"plugin-b"})
-					dg.AddPlugin("plugin-b", []string{"plugin-c"})
-					dg.AddPlugin("plugin-c", []string{"plugin-a"})
+					_ = dg.AddPlugin("plugin-a", []string{"plugin-b"}) // Ignore error in circular test
+					_ = dg.AddPlugin("plugin-b", []string{"plugin-c"}) // Ignore error in circular test
+					_ = dg.AddPlugin("plugin-c", []string{"plugin-a"}) // Ignore error in circular test
 				},
 				"A -> B -> C -> A",
 			},
@@ -269,12 +290,12 @@ func TestDynamicLoader_DependencyGraph_EdgeCasesAndBugs(t *testing.T) {
 				"ComplexCycle_WithValidNodes",
 				func(dg *DependencyGraph) {
 					// Valid part
-					dg.AddPlugin("valid-1", []string{})
-					dg.AddPlugin("valid-2", []string{"valid-1"})
+					_ = dg.AddPlugin("valid-1", []string{})          // Ignore error in circular test
+					_ = dg.AddPlugin("valid-2", []string{"valid-1"}) // Ignore error in circular test
 					// Cycle part
-					dg.AddPlugin("cycle-a", []string{"cycle-b", "valid-1"})
-					dg.AddPlugin("cycle-b", []string{"cycle-c"})
-					dg.AddPlugin("cycle-c", []string{"cycle-a"})
+					_ = dg.AddPlugin("cycle-a", []string{"cycle-b", "valid-1"}) // Ignore error in circular test
+					_ = dg.AddPlugin("cycle-b", []string{"cycle-c"})            // Ignore error in circular test
+					_ = dg.AddPlugin("cycle-c", []string{"cycle-a"})            // Ignore error in circular test
 				},
 				"Mixed valid + A -> B -> C -> A",
 			},
@@ -286,7 +307,7 @@ func TestDynamicLoader_DependencyGraph_EdgeCasesAndBugs(t *testing.T) {
 					for i := 0; i < cycleLength; i++ {
 						name := fmt.Sprintf("cycle-%d", i)
 						nextName := fmt.Sprintf("cycle-%d", (i+1)%cycleLength)
-						dg.AddPlugin(name, []string{nextName})
+						_ = dg.AddPlugin(name, []string{nextName}) // Ignore error in circular test
 					}
 				},
 				"50-node circular chain",
@@ -332,8 +353,13 @@ func TestDynamicLoader_DependencyGraph_EdgeCasesAndBugs(t *testing.T) {
 			{
 				"SingleMissing_AfterRemoval",
 				func(dg *DependencyGraph) {
-					dg.AddPlugin("dependency", []string{})
-					dg.AddPlugin("plugin-a", []string{"dependency"})
+					addPluginOrFail := func(name string, deps []string) {
+						if err := dg.AddPlugin(name, deps); err != nil {
+							panic(fmt.Sprintf("Failed to add plugin %s: %v", name, err))
+						}
+					}
+					addPluginOrFail("dependency", []string{})
+					addPluginOrFail("plugin-a", []string{"dependency"})
 					dg.RemovePlugin("dependency") // Create dangling reference
 				},
 				"A depends on plugin that was removed",
@@ -341,9 +367,14 @@ func TestDynamicLoader_DependencyGraph_EdgeCasesAndBugs(t *testing.T) {
 			{
 				"MultipleMissing_AfterRemoval",
 				func(dg *DependencyGraph) {
-					dg.AddPlugin("dep-1", []string{})
-					dg.AddPlugin("dep-2", []string{})
-					dg.AddPlugin("plugin-a", []string{"dep-1", "dep-2"})
+					addPluginOrFail := func(name string, deps []string) {
+						if err := dg.AddPlugin(name, deps); err != nil {
+							panic(fmt.Sprintf("Failed to add plugin %s: %v", name, err))
+						}
+					}
+					addPluginOrFail("dep-1", []string{})
+					addPluginOrFail("dep-2", []string{})
+					addPluginOrFail("plugin-a", []string{"dep-1", "dep-2"})
 					dg.RemovePlugin("dep-1")
 					dg.RemovePlugin("dep-2") // Both dependencies removed
 				},
@@ -352,9 +383,14 @@ func TestDynamicLoader_DependencyGraph_EdgeCasesAndBugs(t *testing.T) {
 			{
 				"ChainWithMissing_MiddleNode",
 				func(dg *DependencyGraph) {
-					dg.AddPlugin("plugin-c", []string{})
-					dg.AddPlugin("plugin-b", []string{"plugin-c"})
-					dg.AddPlugin("plugin-a", []string{"plugin-b"})
+					addPluginOrFail := func(name string, deps []string) {
+						if err := dg.AddPlugin(name, deps); err != nil {
+							panic(fmt.Sprintf("Failed to add plugin %s: %v", name, err))
+						}
+					}
+					addPluginOrFail("plugin-c", []string{})
+					addPluginOrFail("plugin-b", []string{"plugin-c"})
+					addPluginOrFail("plugin-a", []string{"plugin-b"})
 					dg.RemovePlugin("plugin-b") // Remove middle dependency
 				},
 				"Chain with removed middle node",
@@ -363,9 +399,14 @@ func TestDynamicLoader_DependencyGraph_EdgeCasesAndBugs(t *testing.T) {
 				"ComplexMissing_PartialRemoval",
 				func(dg *DependencyGraph) {
 					// Create valid graph
-					dg.AddPlugin("base", []string{})
-					dg.AddPlugin("middle", []string{"base"})
-					dg.AddPlugin("top", []string{"middle", "base"})
+					addPluginOrFail := func(name string, deps []string) {
+						if err := dg.AddPlugin(name, deps); err != nil {
+							panic(fmt.Sprintf("Failed to add plugin %s: %v", name, err))
+						}
+					}
+					addPluginOrFail("base", []string{})
+					addPluginOrFail("middle", []string{"base"})
+					addPluginOrFail("top", []string{"middle", "base"})
 					// Remove middle dependency
 					dg.RemovePlugin("middle")
 				},
@@ -407,8 +448,12 @@ func TestDynamicLoader_DependencyGraph_EdgeCasesAndBugs(t *testing.T) {
 			{
 				"AddDuplicate_Plugin",
 				func(dg *DependencyGraph) string {
-					dg.AddPlugin("plugin-a", []string{})
-					dg.AddPlugin("plugin-a", []string{"plugin-b"}) // Update dependencies
+					if err := dg.AddPlugin("plugin-a", []string{}); err != nil {
+						return fmt.Sprintf("Failed to add plugin-a initially: %v", err)
+					}
+					if err := dg.AddPlugin("plugin-a", []string{"plugin-b"}); err != nil {
+						return fmt.Sprintf("Failed to update plugin-a dependencies: %v", err)
+					}
 					deps := dg.GetDependencies("plugin-a")
 					if len(deps) != 1 || deps[0] != "plugin-b" {
 						return fmt.Sprintf("Expected [plugin-b], got %v", deps)
@@ -426,9 +471,15 @@ func TestDynamicLoader_DependencyGraph_EdgeCasesAndBugs(t *testing.T) {
 			{
 				"ModifyDependencies_UpdateRelations",
 				func(dg *DependencyGraph) string {
-					dg.AddPlugin("plugin-a", []string{"plugin-b"})
-					dg.AddPlugin("plugin-b", []string{})
-					dg.AddPlugin("plugin-a", []string{"plugin-c"}) // Change dependencies
+					if err := dg.AddPlugin("plugin-a", []string{"plugin-b"}); err != nil {
+						return fmt.Sprintf("Failed to add plugin-a: %v", err)
+					}
+					if err := dg.AddPlugin("plugin-b", []string{}); err != nil {
+						return fmt.Sprintf("Failed to add plugin-b: %v", err)
+					}
+					if err := dg.AddPlugin("plugin-a", []string{"plugin-c"}); err != nil {
+						return fmt.Sprintf("Failed to update plugin-a dependencies: %v", err)
+					}
 
 					// Verify old relationship cleaned up
 					dependents := dg.GetDependents("plugin-b")
@@ -496,7 +547,7 @@ func TestDynamicLoader_DependencyGraph_ConcurrencyAndPerformance(t *testing.T) {
 						dg.GetDependencies(pluginName)
 
 					case 3: // CalculateLoadOrder
-						dg.CalculateLoadOrder()
+						_, _ = dg.CalculateLoadOrder() // Ignore result in stress test
 					}
 				}
 			}(i)
@@ -579,11 +630,11 @@ func TestDynamicLoader_DependencyGraph_ConcurrencyAndPerformance(t *testing.T) {
 				if j > 0 {
 					deps = []string{fmt.Sprintf("temp-%d-%d", i, j-1)}
 				}
-				dg.AddPlugin(name, deps)
+				_ = dg.AddPlugin(name, deps) // Ignore error in stress test
 			}
 
 			// Calculate order
-			dg.CalculateLoadOrder()
+			_, _ = dg.CalculateLoadOrder() // Ignore result in stress test
 
 			// Remove plugins (cleanup)
 			for j := 0; j < 10; j++ {

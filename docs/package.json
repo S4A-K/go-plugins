@@ -1,0 +1,33 @@
+{
+  "name": "go-plugins-docs",
+  "version": "1.0.0",
+  "description": "Documentation site for go-plugins",
+  "main": "index.js",
+  "scripts": {
+    "build": "hugo --gc --minify",
+    "serve": "hugo server --buildDrafts --buildFuture",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agilira/go-plugins.git"
+  },
+  "keywords": [
+    "go",
+    "golang",
+    "plugins",
+    "documentation",
+    "hugo"
+  ],
+  "author": "AGILira - A. Giordano",
+  "license": "MPL-2.0",
+  "bugs": {
+    "url": "https://github.com/agilira/go-plugins/issues"
+  },
+  "homepage": "https://agilira.github.io/go-plugins",
+  "devDependencies": {
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.31",
+    "postcss-cli": "^10.1.0"
+  }
+}

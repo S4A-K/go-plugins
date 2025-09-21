@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -25,8 +26,9 @@ import (
 
 // TestSubprocessJSONCommunication_SingleRequest tests basic JSON communication
 func TestSubprocessJSONCommunication_SingleRequest(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Skipping JSON subprocess test on Windows due to script execution limitations")
+	// Skip test if Go compiler is not available (e.g., in CI environments)
+	if !isGoCompilerAvailable() {
+		t.Skip("Skipping JSON subprocess test because Go compiler is not available")
 	}
 
 	ctx := context.Background()
@@ -74,8 +76,9 @@ func TestSubprocessJSONCommunication_SingleRequest(t *testing.T) {
 
 // TestSubprocessJSONCommunication_ConcurrentRequests tests concurrent JSON communication
 func TestSubprocessJSONCommunication_ConcurrentRequests(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Skipping JSON subprocess test on Windows due to script execution limitations")
+	// Skip test if Go compiler is not available (e.g., in CI environments)
+	if !isGoCompilerAvailable() {
+		t.Skip("Skipping JSON subprocess test because Go compiler is not available")
 	}
 
 	ctx := context.Background()
@@ -265,4 +268,10 @@ func main() {
 	require.NoError(t, err, "Failed to compile JSON plugin executable")
 
 	return executablePath
+}
+
+// isGoCompilerAvailable checks if the Go compiler is available on the system
+func isGoCompilerAvailable() bool {
+	_, err := exec.LookPath("go")
+	return err == nil
 }

@@ -120,7 +120,7 @@ type PluginInfo struct {
 //   - RequestID: Unique identifier for request tracing and correlation
 //   - Timeout: Maximum execution time for this specific request
 //   - MaxRetries: Number of retry attempts allowed for this request
-//   - Headers: Transport-specific headers (HTTP headers, gRPC metadata, etc.)
+//   - Headers: Transport-specific headers (gRPC metadata, process environment, etc.)
 //   - Metadata: Additional context data (user info, feature flags, etc.)
 //
 // Example usage:
