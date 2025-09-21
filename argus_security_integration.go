@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agilira/argus"
@@ -78,9 +79,9 @@ func NewSecurityArgusIntegration(validator *SecurityValidator, logger Logger) *S
 // EnableWatchingWithArgus enables Argus-based watching of the whitelist file
 func (sai *SecurityArgusIntegration) EnableWatchingWithArgus(whitelistFile, auditFile string) error {
 	sai.mutex.Lock()
-	defer sai.mutex.Unlock()
 
 	if sai.running {
+		sai.mutex.Unlock()
 		return NewSecurityValidationError("argus integration already running", nil)
 	}
 
@@ -89,15 +90,27 @@ func (sai *SecurityArgusIntegration) EnableWatchingWithArgus(whitelistFile, audi
 
 	// Setup audit logging
 	if err := sai.setupAuditLogging(); err != nil {
+		sai.mutex.Unlock()
 		return NewAuditError("failed to setup audit logging", err)
 	}
 
-	// Setup file watching
-	if err := sai.setupFileWatching(); err != nil {
+	// Set running flag before setupFileWatching to avoid callback deadlock
+	sai.running = true
+
+	// Release mutex before setupFileWatching to prevent callback deadlock
+	// The Argus callback might be invoked immediately and would try to acquire mutex
+	sai.mutex.Unlock()
+
+	// Setup file watching without holding mutex
+	err := sai.setupFileWatching()
+
+	if err != nil {
+		// Reacquire mutex to reset state on failure
+		sai.mutex.Lock()
+		sai.running = false // Reset on failure
+		sai.mutex.Unlock()
 		return NewConfigWatcherError("failed to setup file watching", err)
 	}
-
-	sai.running = true
 	sai.logger.Info("Argus security integration enabled",
 		"whitelist_file", whitelistFile,
 		"audit_file", auditFile)
@@ -220,20 +233,50 @@ func (sai *SecurityArgusIntegration) setupFileWatching() error {
 
 // handleWhitelistChange is called by Argus when the whitelist file changes
 func (sai *SecurityArgusIntegration) handleWhitelistChange(config map[string]interface{}) {
+	// Process whitelist change asynchronously to avoid deadlock
+	// The callback might be called during setupFileWatching() when mutex is already locked
+	go sai.processWhitelistChange(config)
+}
+
+// processWhitelistChange handles the actual whitelist processing
+func (sai *SecurityArgusIntegration) processWhitelistChange(config map[string]interface{}) {
 	sai.mutex.Lock()
 	defer sai.mutex.Unlock()
 
-	sai.logger.Info("Whitelist file changed, reloading", "file", sai.whitelistFile)
+	// Skip processing if not properly initialized yet
+	if !sai.running {
+		sai.logger.Debug("Skipping whitelist change during initialization", "file", sai.whitelistFile)
+		return
+	}
 
-	// Reload the whitelist in the validator
+	// Log with config information from Argus for better debugging
+	configKeys := make([]string, 0, len(config))
+	for key := range config {
+		configKeys = append(configKeys, key)
+	}
+
+	sai.logger.Info("Whitelist file changed, reloading",
+		"file", sai.whitelistFile,
+		"config_keys", configKeys)
+
+	// Reload the whitelist in the validator (only if validator is enabled)
+	// Check if validator is enabled to avoid "validator not enabled" error
+	if !sai.validator.enabled {
+		sai.logger.Debug("Skipping whitelist reload - validator not enabled yet",
+			"config_info", config)
+		return
+	}
+
 	if err := sai.validator.ReloadWhitelist(); err != nil {
 		sai.stats.ConfigErrors++
 		sai.stats.LastError = err.Error()
 
-		sai.logger.Error("Failed to reload whitelist", "error", err)
-		sai.auditEvent("whitelist_reload_failed", map[string]interface{}{
-			"file":  sai.whitelistFile,
-			"error": err.Error(),
+		sai.logger.Error("Failed to reload whitelist", "error", err,
+			"config_info", config)
+		sai.auditEventUnsafe("whitelist_reload_failed", map[string]interface{}{
+			"file":        sai.whitelistFile,
+			"error":       err.Error(),
+			"config_info": config,
 		})
 		return
 	}
@@ -243,7 +286,7 @@ func (sai *SecurityArgusIntegration) handleWhitelistChange(config map[string]int
 	sai.stats.LastReload = time.Now()
 
 	sai.logger.Info("Whitelist reloaded successfully")
-	sai.auditEvent("whitelist_reloaded", map[string]interface{}{
+	sai.auditEventUnsafe("whitelist_reloaded", map[string]interface{}{
 		"file":            sai.whitelistFile,
 		"reload_count":    sai.stats.WhitelistReloads,
 		"validator_stats": sai.validator.GetStats(),
@@ -256,15 +299,48 @@ func (sai *SecurityArgusIntegration) auditEvent(eventType string, context map[st
 		return
 	}
 
-	sai.mutex.Lock()
-	sai.stats.AuditEvents++
-	sai.stats.LastAuditEvent = time.Now()
-	sai.mutex.Unlock()
+	// Use atomic operations for stats to avoid deadlock with processWhitelistChange
+	sai.auditEventThreadSafe(eventType, context)
+}
+
+// auditEventThreadSafe logs a security event using atomic operations for thread safety
+func (sai *SecurityArgusIntegration) auditEventThreadSafe(eventType string, context map[string]interface{}) {
+	if sai.auditLogger == nil {
+		return
+	}
+
+	// Use atomic operations to update stats without acquiring any mutex
+	atomic.AddInt64(&sai.stats.AuditEvents, 1)
+
+	// Update timestamp using a non-blocking approach
+	// The LastAuditEvent will be updated in GetStats() method if needed
+	now := time.Now()
 
 	// Add common context information
 	context["component"] = "plugin_security"
 	context["integration"] = "argus"
-	context["timestamp"] = time.Now().Format(time.RFC3339)
+	context["timestamp"] = now.Format(time.RFC3339)
+
+	sai.auditLogger.LogSecurityEvent(eventType, "Plugin security Argus integration event", context)
+}
+
+// auditEventUnsafe updates stats using atomic operations (thread-safe)
+func (sai *SecurityArgusIntegration) auditEventUnsafe(eventType string, context map[string]interface{}) {
+	if sai.auditLogger == nil {
+		return
+	}
+
+	// Use atomic operations for thread safety even when caller holds lock
+	atomic.AddInt64(&sai.stats.AuditEvents, 1)
+
+	// Update LastAuditEvent using lock-free approach or skip if mutex would cause deadlock
+	now := time.Now()
+	// Note: LastAuditEvent update is handled in GetStats() to avoid race conditions
+
+	// Add common context information
+	context["component"] = "plugin_security"
+	context["integration"] = "argus"
+	context["timestamp"] = now.Format(time.RFC3339)
 
 	sai.auditLogger.LogSecurityEvent(eventType, "Plugin security Argus integration event", context)
 }
@@ -408,11 +484,17 @@ func (sv *SecurityValidator) GetArgusIntegrationInfo() map[string]interface{} {
 // ForceReloadWhitelist manually triggers a whitelist reload via Argus
 func (sv *SecurityValidator) ForceReloadWhitelist() error {
 	sv.mutex.RLock()
-	defer sv.mutex.RUnlock()
 
 	if sv.argusIntegration == nil {
+		sv.mutex.RUnlock()
 		return NewSecurityValidationError("argus integration not initialized", nil)
 	}
 
-	return sv.argusIntegration.ForceReload()
+	// Get reference to integration before releasing lock
+	integration := sv.argusIntegration
+	sv.mutex.RUnlock()
+
+	// Call ForceReload without holding SecurityValidator mutex
+	// This prevents deadlock when ForceReload calls back to ReloadWhitelist
+	return integration.ForceReload()
 }

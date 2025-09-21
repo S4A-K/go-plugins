@@ -6,10 +6,8 @@
 // - CalculateLoadOrder: Kahn's algorithm per topological sorting
 // - ValidateDependencies: Circular dependency detection e missing deps
 //
-// OBIETTIVO: Scoprire bugs negli algoritmi complessi di graph management
-// con focus su circular dependencies, race conditions, e edge cases.
-//
 // Copyright (c) 2025 AGILira - A. Giordano
+// Series: an AGILira library
 // SPDX-License-Identifier: MPL-2.0
 
 package goplugins

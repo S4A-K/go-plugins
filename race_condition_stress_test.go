@@ -1,3 +1,9 @@
+// race_condition_stress_test.go : stress tests
+//
+// Copyright (c) 2025 AGILira - A. Giordano
+// Series: an AGILira library
+// SPDX-License-Identifier: MPL-2.0
+
 package goplugins
 
 import (

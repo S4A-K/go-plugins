@@ -283,22 +283,39 @@ func TestLibraryConfigIntegration_PerformanceUnderLoad(t *testing.T) {
 			time.Sleep(updateInterval)
 		}
 
-		// Wait for final change to be processed
-		finalVersion := fmt.Sprintf("v1.%d.0", numChanges)
-		if err := waitForConfigVersionChange(watcher, "v1.0.0", totalDuration*2); err != nil {
-			t.Fatalf("Final configuration change not detected: %v", err)
-		}
-
-		totalDuration := time.Since(startTime)
-		avgDuration := totalDuration / time.Duration(numChanges)
+		elapsedTime := time.Since(startTime)
+		avgDuration := elapsedTime / time.Duration(numChanges)
 
 		t.Logf("Processed %d configuration changes in %v (avg: %v per change)",
-			numChanges, totalDuration, avgDuration)
+			numChanges, elapsedTime, avgDuration)
+
+		// Wait for final change to be processed with extended timeout
+		finalVersion := fmt.Sprintf("v1.%d.0", numChanges)
+		timeout := time.Duration(numChanges) * updateInterval * 3 // Give more time for race conditions
+		if timeout < totalDuration {
+			timeout = totalDuration // Use the minimum total duration
+		}
+
+		// Wait until we get the exact final version
+		deadline := time.Now().Add(timeout)
+		var finalConfig *LibraryConfig
+		for time.Now().Before(deadline) {
+			finalConfig = watcher.GetCurrentConfig()
+			if finalConfig != nil && finalConfig.Metadata.Version == finalVersion {
+				break // Got the final version
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 
 		// Validate final state
-		finalConfig := watcher.GetCurrentConfig()
-		if finalConfig.Metadata.Version != finalVersion {
-			t.Errorf("Expected final version %s, got: %s", finalVersion, finalConfig.Metadata.Version)
+		if finalConfig == nil || finalConfig.Metadata.Version != finalVersion {
+			t.Errorf("Expected final version %s, got: %s", finalVersion,
+				func() string {
+					if finalConfig == nil {
+						return "nil"
+					}
+					return finalConfig.Metadata.Version
+				}())
 		}
 	})
 

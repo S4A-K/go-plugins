@@ -13,6 +13,7 @@ package goplugins
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -675,4 +676,354 @@ func BenchmarkUnifiedPluginFactory_RegisterCustomFactory(b *testing.B) {
 			b.Fatalf("Factory registration failed: %v", err)
 		}
 	}
+}
+
+// TestUnifiedPluginFactoryCore tests core functionality of UnifiedPluginFactory
+func TestUnifiedPluginFactoryCore(t *testing.T) {
+	t.Run("NewUnifiedPluginFactory_Initialization", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewUnifiedPluginFactory[TestRequest, TestResponse](logger)
+
+		// Verify factory is properly initialized
+		if factory == nil {
+			t.Fatal("Expected factory to be initialized")
+		}
+
+		// Verify supported transports include defaults
+		transports := factory.SupportedTransports()
+		if len(transports) == 0 {
+			t.Error("Expected factory to have default transports")
+		}
+
+		// Should have at least executable transport
+		hasExecutable := false
+		for _, transport := range transports {
+			if transport == "exec" {
+				hasExecutable = true
+				break
+			}
+		}
+		if !hasExecutable {
+			t.Error("Expected factory to support executable transport by default")
+		}
+	})
+
+	t.Run("CreatePlugin_ValidConfiguration", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewUnifiedPluginFactory[TestRequest, TestResponse](logger)
+
+		// Register mock factory for testing
+		mockFactory := &mockPluginFactory{}
+		err := factory.RegisterFactory("mock-transport", mockFactory)
+		if err != nil {
+			t.Fatalf("Failed to register mock factory: %v", err)
+		}
+
+		config := PluginConfig{
+			Name:      "test-plugin",
+			Type:      "service",
+			Transport: "mock-transport",
+			Endpoint:  "mock://endpoint",
+			Auth: AuthConfig{
+				Method: AuthNone,
+			},
+		}
+
+		plugin, err := factory.CreatePlugin(config)
+		if err != nil {
+			t.Fatalf("Failed to create plugin: %v", err)
+		}
+
+		if plugin == nil {
+			t.Fatal("Expected plugin to be created")
+		}
+
+		// Verify plugin info
+		info := plugin.Info()
+		if info.Name != "test-plugin" {
+			t.Errorf("Expected plugin name 'test-plugin', got %s", info.Name)
+		}
+	})
+
+	t.Run("CreatePlugin_UnsupportedTransport", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewUnifiedPluginFactory[TestRequest, TestResponse](logger)
+
+		config := PluginConfig{
+			Name:      "test-plugin",
+			Type:      "service",
+			Transport: "unsupported-transport",
+			Endpoint:  "mock://endpoint",
+			Auth: AuthConfig{
+				Method: AuthNone,
+			},
+		}
+
+		_, err := factory.CreatePlugin(config)
+		if err == nil {
+			t.Fatal("Expected error for unsupported transport")
+		}
+
+		// Verify error message mentions transport
+		if !strings.Contains(err.Error(), "unsupported transport") {
+			t.Errorf("Expected error to mention unsupported transport, got: %v", err)
+		}
+	})
+
+	t.Run("CreatePlugin_InvalidConfiguration", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewUnifiedPluginFactory[TestRequest, TestResponse](logger)
+
+		// Register mock factory
+		mockFactory := &mockPluginFactory{}
+		if regErr := factory.RegisterFactory("mock-transport", mockFactory); regErr != nil {
+			t.Fatalf("Failed to register mock factory: %v", regErr)
+		}
+
+		// Invalid config - empty name
+		config := PluginConfig{
+			Name:      "", // Invalid empty name
+			Type:      "service",
+			Transport: "mock-transport",
+			Endpoint:  "mock://endpoint",
+			Auth: AuthConfig{
+				Method: AuthNone,
+			},
+		}
+
+		_, err := factory.CreatePlugin(config)
+		if err == nil {
+			t.Fatal("Expected error for invalid configuration")
+		}
+	})
+
+	t.Run("ValidateConfig_ValidConfiguration", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewUnifiedPluginFactory[TestRequest, TestResponse](logger)
+
+		// Register mock factory
+		mockFactory := &mockPluginFactory{}
+		if regErr := factory.RegisterFactory("mock-transport", mockFactory); regErr != nil {
+			t.Fatalf("Failed to register mock factory: %v", regErr)
+		}
+
+		config := PluginConfig{
+			Name:      "test-plugin",
+			Type:      "service",
+			Transport: "mock-transport",
+			Endpoint:  "mock://endpoint",
+			Auth: AuthConfig{
+				Method: AuthNone,
+			},
+		}
+
+		err := factory.ValidateConfig(config)
+		if err != nil {
+			t.Errorf("Expected valid configuration, got error: %v", err)
+		}
+	})
+
+	t.Run("ValidateConfig_UnsupportedTransport", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewUnifiedPluginFactory[TestRequest, TestResponse](logger)
+
+		config := PluginConfig{
+			Name:      "test-plugin",
+			Type:      "service",
+			Transport: "unsupported-transport",
+			Endpoint:  "mock://endpoint",
+			Auth: AuthConfig{
+				Method: AuthNone,
+			},
+		}
+
+		err := factory.ValidateConfig(config)
+		if err == nil {
+			t.Fatal("Expected error for unsupported transport")
+		}
+	})
+}
+
+// TestFactoryConvenienceFunctions tests the convenience factory functions
+func TestFactoryConvenienceFunctions(t *testing.T) {
+	t.Run("NewSimpleSubprocessFactory", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewSimpleSubprocessFactory[TestRequest, TestResponse](logger)
+
+		if factory == nil {
+			t.Fatal("Expected factory to be initialized")
+		}
+
+		// Verify it supports executable transport
+		transports := factory.SupportedTransports()
+		hasExecutable := false
+		for _, transport := range transports {
+			if transport == "exec" {
+				hasExecutable = true
+				break
+			}
+		}
+		if !hasExecutable {
+			t.Error("Expected subprocess factory to support executable transport")
+		}
+	})
+
+	t.Run("NewSimpleGRPCFactory", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewSimpleGRPCFactory[TestRequest, TestResponse](logger)
+
+		if factory == nil {
+			t.Fatal("Expected factory to be initialized")
+		}
+
+		// Should fallback to subprocess since TestRequest/TestResponse don't implement ProtobufMessage
+		transports := factory.SupportedTransports()
+		if len(transports) == 0 {
+			t.Error("Expected factory to have supported transports")
+		}
+	})
+
+	t.Run("NewMultiTransportFactory", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewMultiTransportFactory[TestRequest, TestResponse](logger)
+
+		if factory == nil {
+			t.Fatal("Expected factory to be initialized")
+		}
+
+		transports := factory.SupportedTransports()
+		if len(transports) == 0 {
+			t.Error("Expected multi-transport factory to have supported transports")
+		}
+	})
+}
+
+// TestConfigurationValidation tests internal configuration validation
+func TestConfigurationValidation(t *testing.T) {
+	t.Run("ValidateConfiguration_ValidConfig", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewUnifiedPluginFactory[TestRequest, TestResponse](logger)
+
+		config := PluginConfig{
+			Name:      "valid-plugin",
+			Type:      "service",
+			Transport: "exec",
+			Endpoint:  "/path/to/binary",
+			Auth: AuthConfig{
+				Method: AuthNone,
+			},
+		}
+
+		// This should use validateConfiguration internally through CreatePlugin
+		_, err := factory.CreatePlugin(config)
+		// May fail at plugin creation but should pass validation
+		if err != nil && strings.Contains(err.Error(), "validation") {
+			t.Errorf("Configuration validation failed: %v", err)
+		}
+	})
+
+	t.Run("ValidateConfiguration_EmptyName", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewUnifiedPluginFactory[TestRequest, TestResponse](logger)
+
+		config := PluginConfig{
+			Name:      "", // Invalid empty name
+			Type:      "service",
+			Transport: "exec",
+			Endpoint:  "/path/to/binary",
+			Auth: AuthConfig{
+				Method: AuthNone,
+			},
+		}
+
+		_, err := factory.CreatePlugin(config)
+		if err == nil {
+			t.Error("Expected validation error for empty name")
+		}
+	})
+
+	t.Run("ValidateConfiguration_EmptyEndpoint", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewUnifiedPluginFactory[TestRequest, TestResponse](logger)
+
+		config := PluginConfig{
+			Name:      "test-plugin",
+			Type:      "service",
+			Transport: "exec",
+			Endpoint:  "", // Invalid empty endpoint
+			Auth: AuthConfig{
+				Method: AuthNone,
+			},
+		}
+
+		_, err := factory.CreatePlugin(config)
+		if err == nil {
+			t.Error("Expected validation error for empty endpoint")
+		}
+	})
+
+	t.Run("RegisterFactory_ErrorHandling", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewUnifiedPluginFactory[TestRequest, TestResponse](logger)
+
+		// Test empty transport type
+		err := factory.RegisterFactory("", &mockPluginFactory{})
+		if err == nil {
+			t.Error("Expected error for empty transport type")
+		}
+
+		// Test nil factory
+		err = factory.RegisterFactory("test-transport", nil)
+		if err == nil {
+			t.Error("Expected error for nil factory")
+		}
+	})
+}
+
+// TestFactoryRegistration tests factory registration and management
+func TestFactoryRegistration(t *testing.T) {
+	t.Run("RegisterFactory_Success", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewUnifiedPluginFactory[TestRequest, TestResponse](logger)
+
+		mockFactory := &mockPluginFactory{}
+		err := factory.RegisterFactory("custom-transport", mockFactory)
+		if err != nil {
+			t.Errorf("Expected successful registration, got error: %v", err)
+		}
+
+		// Verify transport is now supported
+		transports := factory.SupportedTransports()
+		hasCustom := false
+		for _, transport := range transports {
+			if transport == "custom-transport" {
+				hasCustom = true
+				break
+			}
+		}
+		if !hasCustom {
+			t.Error("Expected custom transport to be supported after registration")
+		}
+	})
+
+	t.Run("SupportedTransports_ReturnsAll", func(t *testing.T) {
+		logger := NewTestLogger()
+		factory := NewUnifiedPluginFactory[TestRequest, TestResponse](logger)
+
+		// Register multiple custom factories
+		for i := 0; i < 3; i++ {
+			transportName := "custom-transport-" + strconv.Itoa(i)
+			mockFactory := &mockPluginFactory{}
+			if regErr := factory.RegisterFactory(transportName, mockFactory); regErr != nil {
+				t.Fatalf("Failed to register factory %s: %v", transportName, regErr)
+			}
+		}
+
+		transports := factory.SupportedTransports()
+
+		// Should have at least default + 3 custom transports
+		if len(transports) < 4 {
+			t.Errorf("Expected at least 4 supported transports, got %d", len(transports))
+		}
+	})
 }

@@ -622,7 +622,24 @@ func (sv *SecurityValidator) calculateFileHash(filePath string) (string, error) 
 	// Validate file path to prevent directory traversal attacks
 	cleanPath := filepath.Clean(filePath)
 	if strings.Contains(cleanPath, "..") {
-		return "", NewConfigPathError(filePath, "invalid file path")
+		return "", NewConfigPathError(filePath, "invalid file path: contains directory traversal")
+	}
+
+	// Prevent access to dangerous absolute paths (security risk)
+	if filepath.IsAbs(cleanPath) {
+		// Allow only safe directories like /tmp, current working dir, or relative to working dir
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", NewConfigPathError(filePath, "cannot determine working directory")
+		}
+
+		tmpDir := os.TempDir()
+		isInCwd := strings.HasPrefix(cleanPath, cwd)
+		isInTmp := strings.HasPrefix(cleanPath, tmpDir)
+
+		if !isInCwd && !isInTmp {
+			return "", NewConfigPathError(filePath, "invalid file path: absolute paths outside working/temp directories not allowed")
+		}
 	}
 
 	file, err := os.Open(cleanPath) // #nosec G304 - path is validated above

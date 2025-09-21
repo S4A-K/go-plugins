@@ -1,3 +1,9 @@
+// dynamic_loader_compatibility_test.go: Tests for Dynamic Loader Version Compatibility Logic
+//
+// Copyright (c) 2025 AGILira - A. Giordano
+// Series: an AGILira library
+// SPDX-License-Identifier: MPL-2.0
+
 package goplugins
 
 import (

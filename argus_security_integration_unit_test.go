@@ -1,6 +1,7 @@
 package goplugins
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -209,5 +210,169 @@ func TestSecurityArgusIntegration_ThreadSafety(t *testing.T) {
 	stats := integration.GetStats()
 	if stats.AuditEvents != 50 {
 		t.Errorf("Expected AuditEvents to be 50, got %d", stats.AuditEvents)
+	}
+}
+
+// TestSecurityArgusIntegration_EnableWatchingWithArgus_ParameterValidation tests parameter validation
+// This test verifies input validation without external dependencies
+func TestSecurityArgusIntegration_EnableWatchingWithArgus_ParameterValidation(t *testing.T) {
+	// Setup: Create a clean integration instance with mock security validator
+	validator, err := NewSecurityValidator(DefaultSecurityConfig(), NewTestLogger())
+	if err != nil {
+		t.Fatalf("Failed to create security validator: %v", err)
+	}
+	logger := NewTestLogger()
+	integration := NewSecurityArgusIntegration(validator, logger)
+
+	// Pre-condition: Should not be running initially
+	if integration.IsRunning() {
+		t.Error("Integration should not be running initially")
+	}
+
+	// Test setup with valid paths in temp directory (safe for testing)
+	tempDir := t.TempDir() // Automatic cleanup
+	whitelistFile := tempDir + "/whitelist.json"
+	auditFile := tempDir + "/audit.log"
+
+	// Create a valid whitelist file to avoid file validation errors
+	whitelistContent := `{
+		"plugins": [
+			{
+				"name": "test-plugin",
+				"hash": "sha256:abc123def456",
+				"endpoints": ["localhost:8080"],
+				"size_limit": 1048576
+			}
+		],
+		"version": "1.0.0",
+		"last_updated": "2025-09-21T14:00:00Z"
+	}`
+	if err := os.WriteFile(whitelistFile, []byte(whitelistContent), 0644); err != nil {
+		t.Fatalf("Failed to create test whitelist file: %v", err)
+	}
+
+	// Test: Enable watching with proper Argus integration
+	err = integration.EnableWatchingWithArgus(whitelistFile, auditFile)
+
+	// Assertions: Should succeed with proper setup
+	if err != nil {
+		t.Fatalf("EnableWatchingWithArgus should succeed with valid paths and files, got error: %v", err)
+	}
+
+	// Verify integration is now running
+	if !integration.IsRunning() {
+		t.Error("Integration should be running after successful EnableWatchingWithArgus")
+	}
+
+	// Verify internal state is correctly set
+	if integration.whitelistFile != whitelistFile {
+		t.Errorf("Expected whitelistFile to be %s, got %s", whitelistFile, integration.whitelistFile)
+	}
+
+	if integration.auditFile != auditFile {
+		t.Errorf("Expected auditFile to be %s, got %s", auditFile, integration.auditFile)
+	}
+
+	// Verify audit file was created (indicates setupAuditLogging worked)
+	if _, err := os.Stat(auditFile); os.IsNotExist(err) {
+		t.Error("Audit file should exist after successful enable")
+	}
+
+	// Cleanup: Disable to prevent resource leaks in tests
+	if err := integration.DisableWatching(); err != nil {
+		t.Errorf("Failed to disable watching during cleanup: %v", err)
+	}
+
+	// Verify clean shutdown
+	if integration.IsRunning() {
+		t.Error("Integration should not be running after disable")
+	}
+}
+
+// TestSecurityArgusIntegration_EnableWatchingWithArgus_DoubleEnable tests double-enable protection
+// This is a critical security test - multiple enables could cause resource leaks or security bypasses
+func TestSecurityArgusIntegration_EnableWatchingWithArgus_DoubleEnable(t *testing.T) {
+	// Setup: Integration instance
+	validator := &SecurityValidator{}
+	logger := NewTestLogger()
+	integration := NewSecurityArgusIntegration(validator, logger)
+
+	tempDir := t.TempDir()
+	whitelistFile := tempDir + "/whitelist.json"
+	auditFile := tempDir + "/audit.log"
+
+	// Test: First enable should succeed
+	err1 := integration.EnableWatchingWithArgus(whitelistFile, auditFile)
+	if err1 != nil {
+		t.Fatalf("First EnableWatchingWithArgus should succeed, got: %v", err1)
+	}
+
+	// Test: Second enable should fail with specific error
+	err2 := integration.EnableWatchingWithArgus(whitelistFile, auditFile)
+
+	// Assertions: Second enable must be rejected to prevent security issues
+	if err2 == nil {
+		t.Fatal("Second EnableWatchingWithArgus should fail to prevent multiple initializations")
+	}
+
+	// Verify it's the correct error type (not just any error)
+	if !strings.Contains(err2.Error(), "already running") {
+		t.Errorf("Expected 'already running' error, got: %v", err2)
+	}
+
+	// Verify first instance is still running (not corrupted by second call)
+	if !integration.IsRunning() {
+		t.Error("Integration should still be running after failed second enable")
+	}
+
+	// Cleanup
+	if err := integration.DisableWatching(); err != nil {
+		t.Logf("Warning: Failed to disable watching during cleanup: %v", err)
+	}
+}
+
+// TestSecurityArgusIntegration_EnableWatchingWithArgus_InvalidAuditDirectory tests security with invalid audit paths
+// This test can find path traversal vulnerabilities and directory creation edge cases
+func TestSecurityArgusIntegration_EnableWatchingWithArgus_InvalidAuditDirectory(t *testing.T) {
+	// Setup: Integration instance
+	validator := &SecurityValidator{}
+	logger := NewTestLogger()
+	integration := NewSecurityArgusIntegration(validator, logger)
+
+	// Test case 1: Audit file in non-existent deep directory structure
+	tempDir := t.TempDir()
+	whitelistFile := tempDir + "/whitelist.json"
+	invalidAuditFile := "/root/nonexistent/deep/path/audit.log" // Should fail on most systems
+
+	// Test: Enable with invalid audit directory
+	err := integration.EnableWatchingWithArgus(whitelistFile, invalidAuditFile)
+
+	// Assertions: Should fail gracefully, not crash or create security holes
+	if err == nil {
+		t.Fatal("EnableWatchingWithArgus should fail with invalid audit directory")
+		// If this passes, we might have a security issue - directory creation permissions too broad
+	}
+
+	// Verify the error is properly typed (not just a panic recovery)
+	if !strings.Contains(err.Error(), "audit") {
+		t.Errorf("Expected audit-related error message, got: %v", err)
+	}
+
+	// Verify integration is not in inconsistent state
+	if integration.IsRunning() {
+		t.Error("Integration should not be running after failed enable")
+	}
+
+	// Test case 2: Empty audit file (edge case)
+	err2 := integration.EnableWatchingWithArgus(whitelistFile, "")
+
+	// With empty audit file, it should succeed (audit is optional)
+	if err2 != nil {
+		t.Errorf("EnableWatchingWithArgus should succeed with empty audit file (optional), got: %v", err2)
+	} else {
+		// Cleanup if it succeeded
+		if err := integration.DisableWatching(); err != nil {
+			t.Logf("Warning: Failed to disable watching during cleanup: %v", err)
+		}
 	}
 }

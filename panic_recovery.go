@@ -64,8 +64,10 @@ func withCustomRecoveryHandler(handler RecoveryHandler) func() {
 			buf := make([]byte, 64<<10)
 			n := runtime.Stack(buf, false)
 
-			// Call custom handler with panic details
-			handler(r, buf[:n])
+			// Call custom handler with panic details (if handler is not nil)
+			if handler != nil {
+				handler(r, buf[:n])
+			}
 		}
 	}
 }

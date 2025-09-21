@@ -580,14 +580,18 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) Start(ctx context.Context) error {
 //
 // The stop operation is permanent - the watcher cannot be restarted after stopping.
 func (lcw *LibraryConfigWatcher[Req, Resp]) Stop() error {
-	// Fast path: return immediately if already stopped
-	if lcw.stopped.Load() {
-		return NewConfigWatcherError("library config watcher is already stopped", nil)
-	}
-
 	// Use sync.Once to ensure stop operations happen exactly once
 	var stopErr error
+	var wasFirstCall bool
+
 	lcw.stopOnce.Do(func() {
+		wasFirstCall = true
+
+		// Fast path: check if already stopped (inside sync.Once to avoid race)
+		if lcw.stopped.Load() {
+			stopErr = NewConfigWatcherError("library config watcher is already stopped", nil)
+			return
+		}
 		lcw.mutex.Lock()
 		defer lcw.mutex.Unlock()
 
@@ -623,6 +627,15 @@ func (lcw *LibraryConfigWatcher[Req, Resp]) Stop() error {
 			"clean_shutdown": stopErr == nil,
 		})
 	})
+
+	// If this wasn't the first call to sync.Once, it means another goroutine did the work
+	if !wasFirstCall {
+		// Check current state and return appropriate error
+		if lcw.stopped.Load() {
+			return NewConfigWatcherError("library config watcher is already stopped", nil)
+		}
+		return NewConfigWatcherError("library config watcher stop already in progress", nil)
+	}
 
 	return stopErr
 }

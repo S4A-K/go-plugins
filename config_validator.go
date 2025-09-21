@@ -1,7 +1,3 @@
-// Copyright 2025 Agilira. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE.md file.
-
 // config_validator.go provides comprehensive configuration validation
 // for the LibraryConfigWatcher system following production-grade standards.
 //
@@ -15,6 +11,10 @@
 //
 // All validation functions maintain low cyclomatic complexity and comprehensive
 // error reporting for production environments.
+//
+// Copyright (c) 2025 AGILira - A. Giordano
+// Series: an AGILira library
+// SPDX-License-Identifier: MPL-2.0
 
 package goplugins
 

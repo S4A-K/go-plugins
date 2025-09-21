@@ -1,3 +1,9 @@
+// manager_registry_loading_test.go: Tests for Plugin Manager Registry Loading
+//
+// Copyright (c) 2025 AGILira - A. Giordano
+// Series: an AGILira library
+// SPDX-License-Identifier: MPL-2.0
+
 package goplugins
 
 import (
