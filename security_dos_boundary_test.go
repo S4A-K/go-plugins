@@ -42,11 +42,6 @@ func TestValidateWhitelistIntegrity_DoS_FileSizeBoundary(t *testing.T) {
 		if err := createFileWithSize(tmpFile.Name(), maxSize); err != nil {
 			t.Fatalf("Failed to create 10MB file: %v", err)
 		}
-		defer func() {
-			if err := os.Remove(tmpFile.Name()); err != nil {
-				t.Logf("Warning: Failed to remove temp file: %v", err)
-			}
-		}()
 
 		// Should pass - file at maximum allowed size
 		err := integration.ValidateWhitelistIntegrity()
@@ -90,11 +85,6 @@ func TestValidateWhitelistIntegrity_DoS_FileSizeBoundary(t *testing.T) {
 		if err := createFileWithSize(tmpFile.Name(), largeSize); err != nil {
 			t.Fatalf("Failed to create large file: %v", err)
 		}
-		defer func() {
-			if err := os.Remove(tmpFile.Name()); err != nil {
-				t.Logf("Warning: Failed to remove temp file: %v", err)
-			}
-		}()
 
 		// Execution time should be fast (< 100ms) even with large file
 		start := time.Now()

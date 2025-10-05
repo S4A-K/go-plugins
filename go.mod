@@ -3,7 +3,7 @@ module github.com/agilira/go-plugins
 go 1.24.5
 
 require (
-	github.com/agilira/argus v1.0.1
+	github.com/agilira/argus v1.0.2
 	github.com/agilira/go-errors v1.1.0
 	github.com/agilira/go-timecache v1.0.2
 	github.com/stretchr/testify v1.11.1
@@ -14,8 +14,9 @@ require (
 )
 
 require (
-	github.com/agilira/flash-flags v1.0.1 // indirect
+	github.com/agilira/flash-flags v1.1.4 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/mattn/go-sqlite3 v1.14.32 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	golang.org/x/net v0.44.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
