@@ -11,10 +11,28 @@
 package goplugins
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// getAbsolutePath returns an absolute path that works cross-platform
+func getAbsolutePath(name string) string {
+	tempDir := os.TempDir()
+	return filepath.Join(tempDir, name)
+}
+
+// getSystemPath returns a system-specific path that should be forbidden
+func getSystemPath() string {
+	if filepath.Separator == '\\' {
+		// Windows
+		return "C:\\Windows\\System32\\drivers\\etc\\hosts"
+	}
+	// Unix-like systems
+	return "/etc/passwd"
+}
 
 // TestRequest mock request type for testing
 type TestValidatorRequest struct {
@@ -90,15 +108,15 @@ func TestConfigValidator_ValidateLibraryConfig(t *testing.T) {
 			},
 			Security: SecurityConfig{
 				Policy:         SecurityPolicyPermissive,
-				WhitelistFile:  "/tmp/whitelist.json",
+				WhitelistFile:  getAbsolutePath("whitelist.json"),
 				HashAlgorithm:  HashAlgorithmSHA256,
 				MaxFileSize:    1024 * 1024,
 				AllowedTypes:   []string{"plugin"},
-				ForbiddenPaths: []string{"/etc/passwd"},
+				ForbiddenPaths: []string{getSystemPath()},
 				ReloadDelay:    5 * time.Second,
 				AuditConfig: SecurityAuditConfig{
 					Enabled:   true,
-					AuditFile: "/tmp/audit.log",
+					AuditFile: getAbsolutePath("audit.log"),
 				},
 			},
 		}
@@ -190,7 +208,7 @@ func TestConfigValidator_ValidateLibraryConfig(t *testing.T) {
 			},
 			Security: SecurityConfig{
 				Policy:        SecurityPolicy(99), // Invalid security policy
-				WhitelistFile: "/tmp/whitelist.json",
+				WhitelistFile: getAbsolutePath("whitelist.json"),
 			},
 		}
 
@@ -506,7 +524,7 @@ func TestConfigValidator_SecurityConstraints(t *testing.T) {
 	t.Run("SecurityBasics_ValidConfiguration", func(t *testing.T) {
 		config := SecurityConfig{
 			Policy:        SecurityPolicyStrict,
-			WhitelistFile: "/tmp/whitelist.json",
+			WhitelistFile: getAbsolutePath("whitelist.json"),
 			HashAlgorithm: HashAlgorithmSHA256,
 			MaxFileSize:   1024 * 1024,
 		}
@@ -565,7 +583,7 @@ func TestConfigValidator_SecurityConstraints(t *testing.T) {
 	t.Run("SecurityLists_ValidConfiguration", func(t *testing.T) {
 		config := SecurityConfig{
 			AllowedTypes:   []string{"plugin", "service"},
-			ForbiddenPaths: []string{"/etc/passwd", "/root/.ssh"},
+			ForbiddenPaths: []string{getSystemPath(), getAbsolutePath("restricted")},
 		}
 		err := validator.validateSecurityLists(config)
 		if err != nil {
@@ -585,7 +603,7 @@ func TestConfigValidator_SecurityConstraints(t *testing.T) {
 
 	t.Run("SecurityLists_RelativeForbiddenPath", func(t *testing.T) {
 		config := SecurityConfig{
-			ForbiddenPaths: []string{"/etc/passwd", "relative/path"}, // Relative path
+			ForbiddenPaths: []string{getSystemPath(), "relative/path"}, // Relative path
 		}
 		err := validator.validateSecurityLists(config)
 		if err == nil {
@@ -598,7 +616,7 @@ func TestConfigValidator_SecurityConstraints(t *testing.T) {
 			ReloadDelay: 5 * time.Second,
 			AuditConfig: SecurityAuditConfig{
 				Enabled:   true,
-				AuditFile: "/tmp/audit.log",
+				AuditFile: getAbsolutePath("audit.log"),
 			},
 		}
 		err := validator.validateSecurityAuditAndTiming(config)
@@ -636,7 +654,7 @@ func TestConfigValidator_HelperFunctions(t *testing.T) {
 	validator := NewConfigValidator[TestValidatorRequest, TestValidatorResponse]()
 
 	t.Run("ValidateWhitelistPath_ValidAbsolutePath", func(t *testing.T) {
-		err := validator.validateWhitelistPath("/tmp/whitelist.json")
+		err := validator.validateWhitelistPath(getAbsolutePath("whitelist.json"))
 		if err != nil {
 			t.Errorf("Expected valid absolute path, got error: %v", err)
 		}
@@ -678,7 +696,7 @@ func TestConfigValidator_HelperFunctions(t *testing.T) {
 	})
 
 	t.Run("ValidateForbiddenPath_ValidAbsolutePath", func(t *testing.T) {
-		err := validator.validateForbiddenPath(0, "/etc/passwd")
+		err := validator.validateForbiddenPath(0, getSystemPath())
 		if err != nil {
 			t.Errorf("Expected valid absolute path, got error: %v", err)
 		}
@@ -704,7 +722,7 @@ func TestConfigValidator_HelperFunctions(t *testing.T) {
 	t.Run("ValidateAuditConfig_ValidConfiguration", func(t *testing.T) {
 		config := SecurityAuditConfig{
 			Enabled:   true,
-			AuditFile: "/tmp/audit.log",
+			AuditFile: getAbsolutePath("audit.log"),
 		}
 		err := validator.validateAuditConfig(config)
 		if err != nil {
@@ -788,15 +806,15 @@ func TestConfigValidator_IntegratedValidation(t *testing.T) {
 			},
 			Security: SecurityConfig{
 				Policy:         SecurityPolicyAuditOnly,
-				WhitelistFile:  "/var/lib/plugins/whitelist.json",
+				WhitelistFile:  getAbsolutePath("whitelist.json"),
 				HashAlgorithm:  HashAlgorithmSHA256,
 				MaxFileSize:    10 * 1024 * 1024,
 				AllowedTypes:   []string{"service", "plugin", "extension"},
-				ForbiddenPaths: []string{"/etc/shadow", "/root"},
+				ForbiddenPaths: []string{getSystemPath()},
 				ReloadDelay:    10 * time.Second,
 				AuditConfig: SecurityAuditConfig{
 					Enabled:   true,
-					AuditFile: "/var/log/plugins/audit.log",
+					AuditFile: getAbsolutePath("audit.log"),
 				},
 			},
 		}

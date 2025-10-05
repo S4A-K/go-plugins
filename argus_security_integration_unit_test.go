@@ -219,7 +219,7 @@ func TestSecurityArgusIntegration_EnableWatchingWithArgus_ParameterValidation(t 
 	if testing.Short() {
 		t.Skip("Skipping Argus integration test in short mode")
 	}
-	
+
 	// Setup: Create a clean integration instance with mock security validator
 	validator, err := NewSecurityValidator(DefaultSecurityConfig(), NewTestLogger())
 	if err != nil {
