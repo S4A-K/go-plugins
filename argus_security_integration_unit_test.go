@@ -282,7 +282,6 @@ func TestSecurityArgusIntegration_EnableWatchingWithArgus_ParameterValidation(t 
 	if !integration.IsRunning() {
 		t.Error("Integration should be running after successful enable")
 	}
-	}
 
 	// Cleanup: Disable to prevent resource leaks in tests
 	if err := integration.DisableWatching(); err != nil {
