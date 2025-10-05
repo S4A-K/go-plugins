@@ -277,12 +277,11 @@ func TestSecurityArgusIntegration_EnableWatchingWithArgus_ParameterValidation(t 
 		t.Errorf("Expected auditFile to be %s, got %s", auditFile, integration.auditFile)
 	}
 
-	// Verify audit file was created (indicates setupAuditLogging worked)
-	// Note: In CI environments, audit logging might fail due to missing Argus dependencies
-	if _, err := os.Stat(auditFile); os.IsNotExist(err) {
-		t.Logf("Audit file not created - this is expected in CI/test environments without Argus")
-	} else {
-		t.Logf("Audit file created successfully at %s", auditFile)
+	// Note: With Argus v1.0.2+, audit logging uses SQLite database instead of separate files
+	// Verify the integration is running properly (indicates audit setup succeeded)
+	if !integration.IsRunning() {
+		t.Error("Integration should be running after successful enable")
+	}
 	}
 
 	// Cleanup: Disable to prevent resource leaks in tests

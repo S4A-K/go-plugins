@@ -78,13 +78,12 @@ securityConfig := goplugins.SecurityConfig{
     
     // Production audit configuration
     AuditConfig: goplugins.SecurityAuditConfig{
-        Enabled:    true,
-        LogFile:    "/var/log/go-plugins/security-audit.log",
-        LogFormat:  "json",
-        MaxSize:    100, // MB
-        MaxBackups: 30,  // Keep 30 days
-        MaxAge:     30,  // days
-        Compress:   true,
+        Enabled:         true,
+        AuditFile:       "", // Empty = unified SQLite backend (recommended)
+        LogUnauthorized: true,
+        LogAuthorized:   false,
+        LogConfigChanges: true,
+        IncludeMetadata:  true,
     },
 }
 

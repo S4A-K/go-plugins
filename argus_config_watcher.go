@@ -391,7 +391,7 @@ func DefaultLibraryConfigOptions() LibraryConfigOptions {
 		RollbackOnFailure:   true,             // Prevent service disruption
 		AuditConfig: argus.AuditConfig{
 			Enabled:       true,
-			OutputFile:    "go-plugins-library-audit.jsonl",
+			OutputFile:    "", // Empty = unified SQLite backend
 			MinLevel:      argus.AuditInfo,
 			BufferSize:    1000,
 			FlushInterval: 10 * time.Second,

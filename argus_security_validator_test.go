@@ -80,7 +80,7 @@ func TestSecurityValidator_WhitelistValidation(t *testing.T) {
 		HashAlgorithm: HashAlgorithmSHA256,
 		AuditConfig: SecurityAuditConfig{
 			Enabled:         true,
-			AuditFile:       filepath.Join(tempDir, "audit.jsonl"),
+			AuditFile:       "", // Empty = unified SQLite backend
 			LogUnauthorized: true,
 			LogAuthorized:   true,
 		},
@@ -242,7 +242,7 @@ func TestSecurityValidator_ArgusIntegration(t *testing.T) {
 	}()
 
 	whitelistFile := filepath.Join(tempDir, "whitelist.json")
-	auditFile := filepath.Join(tempDir, "audit.jsonl")
+	// auditFile removed - using unified SQLite backend instead
 
 	err = CreateSampleWhitelist(whitelistFile)
 	if err != nil {
@@ -257,7 +257,7 @@ func TestSecurityValidator_ArgusIntegration(t *testing.T) {
 		WatchConfig:   true,
 		AuditConfig: SecurityAuditConfig{
 			Enabled:   true,
-			AuditFile: auditFile,
+			AuditFile: "", // Empty = unified SQLite backend
 		},
 	}
 
@@ -300,10 +300,9 @@ func TestSecurityValidator_ArgusIntegration(t *testing.T) {
 		t.Logf("Force reload failed (expected in test environment): %v", err)
 	}
 
-	// Check that audit file was created
-	if _, err := os.Stat(auditFile); os.IsNotExist(err) {
-		t.Error("Audit file should have been created")
-	}
+	// Note: With unified SQLite audit system, audit data is stored in system database
+	// The audit system may or may not create files depending on backend selection
+	// We skip file existence check since SQLite backend uses system-audit.db in temp directory
 }
 
 // TestSecurityValidator_HashValidation tests hash-based validation
@@ -427,7 +426,7 @@ func TestManager_SecurityIntegration(t *testing.T) {
 		WhitelistFile: whitelistFile,
 		AuditConfig: SecurityAuditConfig{
 			Enabled:   true,
-			AuditFile: filepath.Join(tempDir, "manager_audit.jsonl"),
+			AuditFile: "", // Empty = unified SQLite backend
 		},
 	}
 

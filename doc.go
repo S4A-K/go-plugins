@@ -74,7 +74,7 @@
 //   - Plugin Whitelisting: SHA256 hash validation of plugin binaries
 //   - Security Policies: Strict, Permissive, and Audit modes
 //   - Authentication: mTLS, API key, Bearer token, Basic, and Custom methods
-//   - Audit Logging: Comprehensive security event logging with rotation
+//   - Audit Logging: Comprehensive security event logging with unified SQLite backend
 //   - Path Traversal Protection: Prevents malicious path manipulation
 //   - Hot-reload: Security configuration updates without restart
 //   - Process Isolation: Subprocess plugins run in isolated processes

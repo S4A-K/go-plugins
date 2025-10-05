@@ -49,7 +49,7 @@ func main() {
 
 	// Create example whitelist
 	whitelistFile := filepath.Join(tempDir, "security-whitelist.json")
-	auditFile := filepath.Join(tempDir, "security-audit.jsonl")
+	// auditFile removed - using unified SQLite backend
 
 	fmt.Println("\nCreating sample whitelist...")
 	if err := goplugins.CreateSampleWhitelist(whitelistFile); err != nil {
@@ -59,7 +59,7 @@ func main() {
 
 	// Setup manager with security
 	fmt.Println("\nSetting up plugin manager with security...")
-	manager := setupSecureManager(whitelistFile, auditFile)
+	manager := setupSecureManager(whitelistFile)
 
 	// Show basic security information
 	fmt.Println("\nSecurity system information:")
@@ -72,12 +72,12 @@ func main() {
 	fmt.Printf("Policy: %s\n", config.Policy.String())
 	fmt.Printf("Hash Algorithm: %v\n", config.HashAlgorithm)
 	fmt.Printf("Whitelist File: %s\n", whitelistFile)
-	fmt.Printf("Audit File: %s\n", auditFile)
+	fmt.Println("Audit: Using unified SQLite database")
 
 	fmt.Println("\nDemo completed successfully!")
 }
 
-func setupSecureManager(whitelistFile, auditFile string) *goplugins.Manager[DemoRequest, DemoResponse] {
+func setupSecureManager(whitelistFile string) *goplugins.Manager[DemoRequest, DemoResponse] {
 	fmt.Println("Creating plugin manager...")
 
 	// Create manager with nil logger to avoid logger type issues
@@ -95,7 +95,7 @@ func setupSecureManager(whitelistFile, auditFile string) *goplugins.Manager[Demo
 		AllowedTypes:  []string{"http", "grpc", "https"},
 		AuditConfig: goplugins.SecurityAuditConfig{
 			Enabled:   true,
-			AuditFile: auditFile,
+			AuditFile: "", // Empty = unified SQLite backend
 		},
 	}
 

@@ -462,11 +462,24 @@ func TestSecurityConfigHotReload(t *testing.T) {
 		t.Fatalf("Failed to write updated config: %v", err)
 	}
 
-	// Wait for hot reload
-	time.Sleep(500 * time.Millisecond)
+	// Wait for hot reload with retry logic for better cross-platform compatibility
+	var config2 *LibraryConfig
+	maxWait := 3 * time.Second
+	start := time.Now()
+
+	for time.Since(start) < maxWait {
+		time.Sleep(100 * time.Millisecond)
+		config2 = watcher.GetCurrentConfig()
+
+		// Check if the update has been applied
+		if config2.Security.Enabled &&
+			config2.Security.Policy == SecurityPolicyStrict &&
+			config2.Security.MaxFileSize == 1024*1024 {
+			break
+		}
+	}
 
 	// Verify updated state
-	config2 := watcher.GetCurrentConfig()
 	if !config2.Security.Enabled {
 		t.Error("Security should be enabled after update")
 	}

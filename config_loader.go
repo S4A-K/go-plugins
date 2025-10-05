@@ -208,7 +208,7 @@ func DefaultDynamicConfigOptions() DynamicConfigOptions {
 		RollbackOnFailure: true,
 		AuditConfig: argus.AuditConfig{
 			Enabled:       true,
-			OutputFile:    "go-plugins-config-audit.jsonl",
+			OutputFile:    "", // Empty = unified SQLite backend
 			MinLevel:      argus.AuditInfo,
 			BufferSize:    1000,
 			FlushInterval: 5 * time.Second,

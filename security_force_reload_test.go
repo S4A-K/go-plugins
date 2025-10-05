@@ -292,15 +292,30 @@ func TestForceReload_ConcurrencyControl_RaceConditions(t *testing.T) {
 					_ = integration.stats.ConfigErrors
 					_ = integration.stats.LastError
 					integration.mutex.RUnlock()
-					time.Sleep(time.Microsecond)
+
+					sleepDuration := time.Microsecond
+					if testing.Short() {
+						// Longer sleep to reduce contention under race detection
+						sleepDuration = time.Millisecond
+					}
+					time.Sleep(sleepDuration)
 				}
 			}
 		}()
 
 		// Execute multiple reloads while reads are ongoing
-		for i := 0; i < 50; i++ {
+		reloadCount := 50
+		sleepDuration := time.Microsecond
+
+		if testing.Short() {
+			// Reduce load for race detection and CI environments
+			reloadCount = 10
+			sleepDuration = time.Millisecond
+		}
+
+		for i := 0; i < reloadCount; i++ {
 			_ = integration.ForceReload()
-			time.Sleep(time.Microsecond)
+			time.Sleep(sleepDuration)
 		}
 
 		// Ferma letture

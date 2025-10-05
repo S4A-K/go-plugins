@@ -20,8 +20,15 @@ func TestRaceConditionStressTest(t *testing.T) {
 	t.Run("RequestTracker_HighConcurrency", func(t *testing.T) {
 		tracker := NewRequestTracker()
 
-		const numGoroutines = 1000
-		const numOperationsPerGoroutine = 100
+		// Reduce load when running with race detector to avoid CI timeout
+		numGoroutines := 1000
+		numOperationsPerGoroutine := 100
+
+		if testing.Short() {
+			// Reduced load for -short tests and race detection
+			numGoroutines = 100
+			numOperationsPerGoroutine = 10
+		}
 
 		var wg sync.WaitGroup
 		var totalOperations atomic.Int64
@@ -74,8 +81,14 @@ func TestRaceConditionStressTest(t *testing.T) {
 
 	t.Run("AtomicOperations_Consistency", func(t *testing.T) {
 		// Test atomic operations consistency under high concurrency
-		const numGoroutines = 500
-		const numOperations = 1000
+		numGoroutines := 500
+		numOperations := 1000
+
+		if testing.Short() {
+			// Reduced load for -short tests and race detection
+			numGoroutines = 50
+			numOperations = 100
+		}
 
 		var counter atomic.Int64
 		var wg sync.WaitGroup
