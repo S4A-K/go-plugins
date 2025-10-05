@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agilira/argus"
 )
 
 // TestLibraryConfigWithSecurityConfig tests the unified configuration with SecurityConfig
@@ -381,6 +383,13 @@ func TestSecurityConfigHotReload(t *testing.T) {
 		PollInterval:        50 * time.Millisecond,
 		ValidateBeforeApply: true,
 		RollbackOnFailure:   true,
+		AuditConfig: argus.AuditConfig{
+			Enabled:       true,
+			OutputFile:    "", // Empty = unified SQLite backend
+			MinLevel:      argus.AuditInfo,
+			BufferSize:    1000,
+			FlushInterval: 10 * time.Second,
+		},
 	}
 	watcher, err := NewLibraryConfigWatcher(manager, configFile, options, nil)
 	if err != nil {
@@ -462,19 +471,39 @@ func TestSecurityConfigHotReload(t *testing.T) {
 		t.Fatalf("Failed to write updated config: %v", err)
 	}
 
-	// Wait for hot reload with retry logic for better cross-platform compatibility
+	// Force file system sync (critical for macOS CI environments)
+	if file, err := os.OpenFile(configFile, os.O_RDWR, 0644); err == nil {
+		file.Sync() // Force OS to flush to disk
+		file.Close()
+	}
+
+	// Extra wait for macOS file system notifications (detected via runtime)
+	if runtime.GOOS == "darwin" {
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Wait for hot reload with extended retry logic for macOS compatibility
 	var config2 *LibraryConfig
-	maxWait := 3 * time.Second
+	maxWait := 10 * time.Second // Increased timeout for macOS CI
 	start := time.Now()
+	attempts := 0
 
 	for time.Since(start) < maxWait {
 		time.Sleep(100 * time.Millisecond)
 		config2 = watcher.GetCurrentConfig()
+		attempts++
+
+		// Log progress for debugging CI issues
+		if attempts%10 == 0 { // Log every second (10 * 100ms)
+			t.Logf("Attempt %d: MaxFileSize=%d, Expected=1048576, Elapsed=%v",
+				attempts, config2.Security.MaxFileSize, time.Since(start))
+		}
 
 		// Check if the update has been applied
 		if config2.Security.Enabled &&
 			config2.Security.Policy == SecurityPolicyStrict &&
 			config2.Security.MaxFileSize == 1024*1024 {
+			t.Logf("✅ Configuration updated successfully after %d attempts (%v)", attempts, time.Since(start))
 			break
 		}
 	}
