@@ -1,4 +1,3 @@
-````markdown
 # go-plugins: Type-safe plugin system for Go
 ### an AGILira library
 
@@ -353,7 +352,7 @@ Comprehensive documentation is available in the [docs](./docs/) folder:
 
 ## What's New
 
-### v2.1.0 - Simplified API Revolution 🚀
+### v2.1.0 - Simplified API Revolution
 
 We've dramatically simplified go-plugins while maintaining 100% backward compatibility:
 
