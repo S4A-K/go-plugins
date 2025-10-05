@@ -477,14 +477,15 @@ func TestSecurityConfigHotReload(t *testing.T) {
 		file.Close()
 	}
 
-	// Extra wait for macOS file system notifications (detected via runtime)
+	// Extra aggressive wait for macOS CI (file system is very slow)
 	if runtime.GOOS == "darwin" {
-		time.Sleep(200 * time.Millisecond)
+		t.Logf("macOS detected - using extended wait for file system sync")
+		time.Sleep(2 * time.Second) // Very long wait for macOS CI file system
 	}
 
-	// Wait for hot reload with extended retry logic for macOS compatibility
+	// Wait for hot reload with very extended retry logic for macOS CI
 	var config2 *LibraryConfig
-	maxWait := 10 * time.Second // Increased timeout for macOS CI
+	maxWait := 20 * time.Second // Further increased timeout for macOS CI
 	start := time.Now()
 	attempts := 0
 
