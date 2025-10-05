@@ -1253,12 +1253,14 @@ func TestSecurityValidator_CreateSampleWhitelist(t *testing.T) {
 	})
 
 	t.Run("file_permission_error", func(t *testing.T) {
-		// Test with invalid path (should fail)
-		invalidPath := "C:\\Windows\\System32\\drivers\\etc\\hosts\\sample.json" // Path that should fail
+		// Test with invalid path (should fail) - use a directory that cannot be created
+		invalidPath := "/dev/null/invalid/sample.json" // Path that should fail on Unix systems
 
 		err := CreateSampleWhitelist(invalidPath)
 		if err == nil {
-			t.Logf("CreateSampleWhitelist should fail with invalid path")
+			t.Errorf("CreateSampleWhitelist should fail with invalid path: %s", invalidPath)
+		} else {
+			t.Logf("CreateSampleWhitelist correctly failed with error: %v", err)
 		}
 	})
 
